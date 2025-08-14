@@ -1,28 +1,33 @@
 from flask import Flask, request, jsonify, render_template_string
 import re
 import os
-import openai
 import requests
 import json
-from functools import lru_cache
+import time
+from openai import OpenAI
 
-# ======== CONFIGURE YOUR OPENAI API KEY ========
-openai.api_key = os.environ.get("OPENAI_API_KEY")  # Set in Render dashboard
+# ======== CONFIGURE OPENAI ========
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-# Load word list
+# ======== LOAD WORD LIST ========
 with open("words.txt") as f:
     WORD_LIST = [w.strip().lower() for w in f if w.strip()]
 
+# ======== IN-MEMORY CACHE ========
+cache = {}  # { "clue|pattern": { "data": [...], "ts": timestamp } }
+CACHE_TTL = 3600  # 1 hour
+
 app = Flask(__name__)
 
-# -------- Pattern-based solver --------
+# =========================
+#   Helper Functions
+# =========================
 def find_matches(pattern):
     regex = "^" + pattern.replace("_", ".").replace("?", ".") + "$"
     return [word for word in WORD_LIST if re.match(regex, word)]
 
-# -------- Dictionary API fallback --------
 def get_meaning_from_api(word):
-    """Fetch meaning from free dictionary API"""
+    """Fallback dictionary API meaning"""
     try:
         url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
         r = requests.get(url, timeout=5)
@@ -36,10 +41,15 @@ def get_meaning_from_api(word):
         pass
     return "No definition found"
 
-# -------- AI + Cache --------
-@lru_cache(maxsize=200)
-def ai_guess_clue_cached(clue, pattern=None):
+def ai_guess_clue(clue, pattern=None):
     """Ask AI to guess crossword answer, return word + meaning with fallback dictionary API."""
+    cache_key = f"{clue}|{pattern}"
+    now = time.time()
+
+    # Check cache
+    if cache_key in cache and (now - cache[cache_key]["ts"]) < CACHE_TTL:
+        return cache[cache_key]["data"]
+
     prompt = f"""You are a crossword puzzle solver.
 Clue: "{clue}".
 If a possible answer length is given in parentheses, respect it.
@@ -50,12 +60,12 @@ Do not include any text outside JSON.
 Pattern (optional): {pattern if pattern else "None"}"""
 
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        ai_text = response.choices[0].message["content"].strip()
+        ai_text = response.choices[0].message.content.strip()
         guesses = json.loads(ai_text)
 
         # Optional: Filter by pattern if AI ignored it
@@ -68,13 +78,16 @@ Pattern (optional): {pattern if pattern else "None"}"""
             if not g.get("meaning") or len(g["meaning"].strip()) < 5:
                 g["meaning"] = get_meaning_from_api(g["word"])
 
+        # Store in cache
+        cache[cache_key] = {"data": guesses, "ts": now}
         return guesses
     except Exception as e:
         return [{"word": "Error", "meaning": str(e)}]
 
-# -------- HTML UI --------
-HTML_PAGE = """
-<!DOCTYPE html>
+# =========================
+#   HTML TEMPLATE
+# =========================
+HTML_PAGE = """<!DOCTYPE html>
 <html>
 <head>
 <title>Crossword Solver + AI</title>
@@ -172,7 +185,6 @@ async function solveClue() {
 </html>
 """
 
-# -------- Routes --------
 @app.route("/")
 def home():
     return render_template_string(HTML_PAGE)
@@ -189,10 +201,9 @@ def solve_clue():
     data = request.json
     clue = data.get("clue", "")
     pattern = data.get("pattern", None)
-    guesses = ai_guess_clue_cached(clue, pattern)
+    guesses = ai_guess_clue(clue, pattern)
     return jsonify(guesses)
 
-# -------- Run App --------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
