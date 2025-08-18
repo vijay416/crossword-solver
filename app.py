@@ -41,16 +41,23 @@ _dict_cache = {}  # { "word": "meaning" }
 # =========================
 def _pattern_to_regex(pattern: str) -> str:
     """
-    Convert crossword-style pattern into regex.
-    Supports _ or ? as wildcards.
+    Convert crossword-like pattern into regex.
+    - _ or ? = single unknown character
+    - Letters/numbers = themselves
+    - Hyphens and apostrophes are preserved
     """
-    # Escape only regex metacharacters, but preserve "-" and "'"
-    safe = re.escape(pattern.lower())
-    # Restore special characters we want to allow literally
-    safe = safe.replace("\\-", "-").replace("\\'", "'")
-    # Replace wildcards
-    safe = safe.replace("\\_", ".").replace("\\?", ".")
-    return f"^{safe}$"
+    regex_parts = []
+    for ch in pattern.lower():
+        if ch in ["_", "?"]:       # underscore OR question mark → wildcard
+            regex_parts.append(".")
+        elif ch.isalnum():
+            regex_parts.append(ch)
+        elif ch in ["-", "'"]:
+            regex_parts.append(ch)
+        else:
+            regex_parts.append(re.escape(ch))
+    return "^" + "".join(regex_parts) + "$"
+
 
 def find_matches_with_meanings(pattern: str):
     """Return [{word, meaning}] for words matching pattern."""
