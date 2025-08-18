@@ -43,10 +43,24 @@ _dict_cache = {}  # { "word": "meaning" }
 #   Helpers
 # =========================
 def _pattern_to_regex(pattern: str) -> str:
-    # Support _ or ? as unknowns. Allow letters and hyphens/apostrophes common in crosswords.
-    esc = re.escape(pattern.lower())
-    esc = esc.replace("\\_", ".").replace("\\?", ".")
-    return f"^{esc}$"
+    """
+    Convert crossword-like pattern into regex.
+    - _ or ? = single unknown character
+    - Letters/numbers = themselves
+    - Hyphens and apostrophes are preserved
+    """
+    regex_parts = []
+    for ch in pattern.lower():
+        if ch in ["_", "?"]:
+            regex_parts.append(".")   # wildcard
+        elif ch.isalnum():
+            regex_parts.append(ch)    # keep letters/numbers
+        elif ch in ["-", "'"]:
+            regex_parts.append(ch)    # allow hyphen/apostrophe
+        else:
+            regex_parts.append(re.escape(ch))  # escape everything else
+    return "^" + "".join(regex_parts) + "$"
+
 
 def find_matches_with_meanings(pattern: str):
     """Return [{word, meaning}] for words matching pattern (limited for performance)."""
