@@ -3,7 +3,6 @@ import re
 import time
 import json
 import threading
-from functools import lru_cache
 from flask import Flask, request, jsonify, render_template_string
 import requests
 
@@ -19,9 +18,7 @@ app = Flask(__name__)
 # =========================
 #   Config
 # =========================
-# Cap pattern results to keep the page fast (tweak as you like)
-PATTERN_RESULT_LIMIT = int(os.environ.get("PATTERN_RESULT_LIMIT", "50"))
-# Cache TTL for AI results (seconds)
+PATTERN_RESULT_LIMIT = int(os.environ.get("PATTERN_RESULT_LIMIT", "20"))
 AI_CACHE_TTL = int(os.environ.get("AI_CACHE_TTL", "3600"))  # 1 hour
 
 # =========================
@@ -44,29 +41,21 @@ _dict_cache = {}  # { "word": "meaning" }
 # =========================
 def _pattern_to_regex(pattern: str) -> str:
     """
-    Convert crossword-like pattern into regex.
-    - _ or ? = single unknown character
-    - Letters/numbers = themselves
-    - Hyphens and apostrophes are preserved
+    Convert crossword-style pattern into regex.
+    Supports _ or ? as wildcards.
     """
-    regex_parts = []
-    for ch in pattern.lower():
-        if ch in ["_", "?"]:
-            regex_parts.append(".")   # wildcard
-        elif ch.isalnum():
-            regex_parts.append(ch)    # keep letters/numbers
-        elif ch in ["-", "'"]:
-            regex_parts.append(ch)    # allow hyphen/apostrophe
-        else:
-            regex_parts.append(re.escape(ch))  # escape everything else
-    return "^" + "".join(regex_parts) + "$"
-
+    # Escape only regex metacharacters, but preserve "-" and "'"
+    safe = re.escape(pattern.lower())
+    # Restore special characters we want to allow literally
+    safe = safe.replace("\\-", "-").replace("\\'", "'")
+    # Replace wildcards
+    safe = safe.replace("\\_", ".").replace("\\?", ".")
+    return f"^{safe}$"
 
 def find_matches_with_meanings(pattern: str):
-    """Return [{word, meaning}] for words matching pattern (limited for performance)."""
+    """Return [{word, meaning}] for words matching pattern."""
     rx = re.compile(_pattern_to_regex(pattern))
     matches = [w for w in WORD_LIST if rx.match(w)]
-    # keep first N to avoid hammering the dictionary API
     matches = matches[:PATTERN_RESULT_LIMIT]
     return [{"word": w, "meaning": get_meaning(w)} for w in matches]
 
@@ -132,42 +121,39 @@ Pattern: "{pattern.strip() if pattern else ''}"
             text = resp.choices[0].message.content.strip()
             guesses = json.loads(text)
 
-            # Ensure structure
             if not isinstance(guesses, list):
                 guesses = []
         except Exception as e:
             guesses = [{"word": "Error", "meaning": f"AI error: {str(e)}"}]
 
-    # Filter by pattern (AI might ignore)
+    # Filter by pattern
     if guesses and pattern:
         rx = re.compile(_pattern_to_regex(pattern))
         guesses = [g for g in guesses if isinstance(g, dict)
                    and "word" in g and rx.match(g["word"].lower())]
 
-    # Fallback: if no AI or empty result, try pattern-only from dictionary
+    # Fallback
     if (not guesses) and pattern:
         guesses = find_matches_with_meanings(pattern)
 
-    # Enrich meanings via dictionary for quality/consistency
+    # Enrich meanings
     enriched = []
     for g in guesses:
         word = (g.get("word") or "").strip()
         if not word:
             continue
         meaning = g.get("meaning", "").strip()
-        # Overwrite with dictionary meaning if missing/weak
         if len(meaning) < 5 or meaning.lower().startswith("ai error"):
             meaning = get_meaning(word)
         enriched.append({"word": word, "meaning": meaning})
 
-    # Cache
     with _ai_cache_lock:
         _ai_cache[cache_key] = {"ts": now, "data": enriched}
 
     return enriched
 
 # =========================
-#   HTML (simple single-file UI)
+#   HTML UI
 # =========================
 HTML_PAGE = """<!doctype html>
 <html>
@@ -308,6 +294,5 @@ def solve_clue():
 #   Entrypoint
 # =========================
 if __name__ == "__main__":
-    # Local dev server; on Render/Heroku use Gunicorn via Procfile
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
