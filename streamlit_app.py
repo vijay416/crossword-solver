@@ -3,6 +3,7 @@ import re
 import json
 import requests
 import streamlit as st
+
 from openai import OpenAI
 
 
@@ -10,14 +11,17 @@ from openai import OpenAI
 # CONFIG
 # =========================================================
 
-PATTERN_RESULT_LIMIT = 100
+PATTERN_RESULT_LIMIT = 20
 AI_CANDIDATE_LIMIT = 500
 AI_RESULT_LIMIT = 5
 DICTIONARY_TIMEOUT = 5
 
+# How many words to consider when ranking pattern matches
+RANKING_CANDIDATE_LIMIT = 1000
+
 
 # =========================================================
-# PAGE
+# PAGE CONFIG
 # =========================================================
 
 st.set_page_config(
@@ -28,22 +32,40 @@ st.set_page_config(
 
 
 # =========================================================
-# OPENAI
+# SESSION STATE
+# =========================================================
+
+if "pattern_matches" not in st.session_state:
+    st.session_state["pattern_matches"] = []
+
+if "searched_pattern" not in st.session_state:
+    st.session_state["searched_pattern"] = ""
+
+if "meaning_cache" not in st.session_state:
+    st.session_state["meaning_cache"] = {}
+
+
+# =========================================================
+# OPENAI CONFIGURATION
 # =========================================================
 
 def get_openai_key():
+
     try:
         return st.secrets["OPENAI_API_KEY"]
+
     except Exception:
         return os.environ.get("OPENAI_API_KEY")
 
 
 def get_openai_model():
+
     try:
         return st.secrets.get(
             "OPENAI_MODEL",
             "gpt-4o-mini"
         )
+
     except Exception:
         return os.environ.get(
             "OPENAI_MODEL",
@@ -54,8 +76,13 @@ def get_openai_model():
 OPENAI_API_KEY = get_openai_key()
 
 if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    client = OpenAI(
+        api_key=OPENAI_API_KEY
+    )
+
 else:
+
     client = None
 
 
@@ -83,12 +110,20 @@ def load_words():
                 if not word:
                     continue
 
-                # Maximum 9 letters
+                # Maximum 9 characters
                 if len(word) > 9:
                     continue
 
-                # Ignore spaces
+                # Ignore words containing spaces
                 if " " in word:
+                    continue
+
+                # Keep only alphabetic words plus
+                # apostrophe/hyphenated words
+                if not all(
+                    ch.isalpha() or ch in ["-", "'"]
+                    for ch in word
+                ):
                     continue
 
                 words.append(word)
@@ -101,39 +136,167 @@ def load_words():
 
 
 WORD_LIST = load_words()
-# =========================================================
-# SESSION STATE
-# =========================================================
-
-if "pattern_matches" not in st.session_state:
-    st.session_state["pattern_matches"] = []
-
-if "searched_pattern" not in st.session_state:
-    st.session_state["searched_pattern"] = ""
-
-if "show_meanings" not in st.session_state:
-    st.session_state["show_meanings"] = {}
 
 
 # =========================================================
-# PATTERN SEARCH
+# WORD COMMONNESS / RANKING
+# =========================================================
+
+@st.cache_resource
+def load_word_frequency():
+
+    """
+    Try to use the wordfreq package.
+
+    If it is not installed, the application still works
+    using the fallback scoring system.
+    """
+
+    try:
+
+        from wordfreq import zipf_frequency
+
+        return zipf_frequency
+
+    except Exception:
+
+        return None
+
+
+ZIPF_FREQUENCY = load_word_frequency()
+
+
+def word_score(word):
+
+    """
+    Estimate how likely a word is to be a useful/common
+    crossword answer.
+
+    Higher score = more common/useful.
+
+    If wordfreq is available, use its English frequency.
+
+    Otherwise use a lightweight heuristic.
+    """
+
+    word = word.lower()
+
+    # -----------------------------------------------------
+    # Best option: wordfreq
+    # -----------------------------------------------------
+
+    if ZIPF_FREQUENCY:
+
+        score = ZIPF_FREQUENCY(
+            word,
+            "en"
+        )
+
+        # Small crossword-friendly adjustments
+
+        # Penalize very long words slightly
+        if len(word) >= 8:
+            score -= 0.15
+
+        # Penalize obvious plural
+        if (
+            len(word) > 3
+            and word.endswith("s")
+        ):
+            score -= 0.20
+
+        return score
+
+    # -----------------------------------------------------
+    # Fallback scoring
+    # -----------------------------------------------------
+
+    score = 0.0
+
+    length = len(word)
+
+    # Prefer normal crossword lengths
+    if 3 <= length <= 7:
+        score += 2.0
+
+    elif length == 8:
+        score += 1.0
+
+    elif length == 9:
+        score += 0.5
+
+    # Slight preference for shorter answers
+    score += max(
+        0,
+        8 - length
+    ) * 0.1
+
+    # Penalize obvious plurals
+    if (
+        length > 3
+        and word.endswith("s")
+    ):
+        score -= 0.5
+
+    # Penalize unusual letter combinations
+    unusual_patterns = [
+        "qz",
+        "qx",
+        "jq",
+        "zx",
+        "jz"
+    ]
+
+    for pattern in unusual_patterns:
+
+        if pattern in word:
+            score -= 1.0
+
+    return score
+
+
+def rank_words(words):
+
+    """
+    Sort words by estimated English commonness.
+
+    Most likely/common words first.
+    """
+
+    return sorted(
+        words,
+        key=lambda word: (
+            -word_score(word),
+            len(word),
+            word
+        )
+    )
+
+
+# =========================================================
+# PATTERN → REGEX
 # =========================================================
 
 def pattern_to_regex(pattern):
-    """
-    Convert crossword pattern to regex.
 
-    Rules:
+    """
+    Crossword pattern rules:
+
         ? = unknown letter
         _ = unknown letter
-        letters/numbers = fixed characters
+
+        letters = fixed letters
+        numbers = fixed numbers
+
         - = literal hyphen
         ' = literal apostrophe
 
     Examples:
-        C_T  -> CAT, COT, CUT
-        C?T  -> CAT, COT, CUT
-        ??A? -> four-letter words with A in position 3
+
+        C_T
+        C?T
+        ??A?
+        S???
     """
 
     regex_parts = []
@@ -141,22 +304,35 @@ def pattern_to_regex(pattern):
     for ch in pattern.lower():
 
         if ch in ["?", "_"]:
+
             # One unknown character
             regex_parts.append(".")
 
         elif ch.isalnum():
-            # Known letter/number
+
+            # Fixed character
             regex_parts.append(ch)
 
         elif ch in ["-", "'"]:
+
             # Literal punctuation
-            regex_parts.append(re.escape(ch))
+            regex_parts.append(
+                re.escape(ch)
+            )
 
         else:
-            # Escape any other character
-            regex_parts.append(re.escape(ch))
+
+            # Escape anything else
+            regex_parts.append(
+                re.escape(ch)
+            )
 
     return "^" + "".join(regex_parts) + "$"
+
+
+# =========================================================
+# FIND PATTERN MATCHES
+# =========================================================
 
 def find_candidates(
     pattern,
@@ -164,7 +340,10 @@ def find_candidates(
 ):
 
     if not pattern:
+
         return []
+
+    pattern = pattern.strip().lower()
 
     try:
 
@@ -176,18 +355,18 @@ def find_candidates(
 
         return []
 
-    results = []
+    matches = []
 
     for word in WORD_LIST:
 
-        if regex.match(word):
+        if regex.fullmatch(word):
 
-            results.append(word)
+            matches.append(word)
 
-            if len(results) >= limit:
-                break
+    # Rank by commonness
+    matches = rank_words(matches)
 
-    return results
+    return matches[:limit]
 
 
 # =========================================================
@@ -198,9 +377,9 @@ def find_candidates(
 def get_meaning(word):
 
     """
-    Fetch definition only when the user asks for it.
+    Fetch definition only when requested.
 
-    Cached for 24 hours.
+    Result is cached for 24 hours.
     """
 
     word = word.lower().strip()
@@ -229,32 +408,36 @@ def get_meaning(word):
         if not data:
             return "Definition unavailable."
 
-        meanings = data[0].get(
-            "meanings",
-            []
-        )
+        # Search through all returned meanings
+        for entry in data:
 
-        if not meanings:
-            return "Definition unavailable."
-
-        # Look through meanings for a definition
-        for meaning in meanings:
-
-            definitions = meaning.get(
-                "definitions",
+            meanings = entry.get(
+                "meanings",
                 []
             )
 
-            for definition in definitions:
+            for meaning in meanings:
 
-                text = definition.get(
-                    "definition"
+                definitions = meaning.get(
+                    "definitions",
+                    []
                 )
 
-                if text:
-                    return text
+                for definition in definitions:
+
+                    text = definition.get(
+                        "definition"
+                    )
+
+                    if text:
+
+                        return text
 
         return "Definition unavailable."
+
+    except requests.exceptions.Timeout:
+
+        return "Definition lookup timed out."
 
     except Exception:
 
@@ -272,9 +455,11 @@ def rank_candidates(
 ):
 
     if not client:
+
         return []
 
     if not candidates:
+
         return []
 
     candidate_text = ", ".join(
@@ -290,7 +475,7 @@ Clue:
 Pattern:
 "{pattern}"
 
-The following are the ONLY possible answers:
+These are the ONLY possible answers:
 
 {candidate_text}
 
@@ -300,7 +485,7 @@ Rules:
 
 1. ONLY use words from the supplied list.
 2. Never invent an answer.
-3. Every answer must match the pattern.
+3. Every answer must match the supplied pattern.
 4. Consider synonyms, alternate meanings,
    crossword conventions and wordplay.
 5. Return at most 5 answers.
@@ -341,9 +526,31 @@ Format:
             .strip()
         )
 
+        # -------------------------------------------------
+        # Handle ```json ... ``` if model returns it
+        # -------------------------------------------------
+
+        if text.startswith("```"):
+
+            text = re.sub(
+                r"^```(?:json)?\s*",
+                "",
+                text
+            )
+
+            text = re.sub(
+                r"\s*```$",
+                "",
+                text
+            )
+
         results = json.loads(text)
 
-        if not isinstance(results, list):
+        if not isinstance(
+            results,
+            list
+        ):
+
             return []
 
         candidate_set = set(
@@ -358,6 +565,7 @@ Format:
                 item,
                 dict
             ):
+
                 continue
 
             word = str(
@@ -366,6 +574,10 @@ Format:
                     ""
                 )
             ).strip().lower()
+
+            # -------------------------------------------------
+            # SECURITY / VALIDATION
+            # -------------------------------------------------
 
             if word not in candidate_set:
                 continue
@@ -392,45 +604,25 @@ Format:
 
         error_text = str(e)
 
-        if "429" in error_text:
+        if (
+            "429" in error_text
+            or "insufficient_quota" in error_text
+            or "credit_balance_exhausted" in error_text
+        ):
 
             st.warning(
-                "AI is currently unavailable "
-                "because the OpenAI API quota "
-                "has been exhausted."
+                "AI is currently unavailable because "
+                "the OpenAI API quota has been exhausted. "
+                "Pattern Search is still available."
             )
 
         else:
 
             st.warning(
-                f"AI could not solve this clue: "
-                f"{error_text}"
+                "AI could not solve this clue."
             )
 
         return []
-
-
-# =========================================================
-# RESULT DISPLAY
-# =========================================================
-
-def display_candidate(
-    word,
-    index,
-    show_meaning=False
-):
-
-    st.markdown(
-        f"### {index}. {word.upper()}"
-    )
-
-    if show_meaning:
-
-        meaning = get_meaning(word)
-
-        st.caption(
-            f"📖 {meaning}"
-        )
 
 
 # =========================================================
@@ -439,9 +631,18 @@ def display_candidate(
 
 st.title("🧩 Crossword Solver")
 
-st.caption(
-    f"Word database: {len(WORD_LIST):,} words"
-)
+if WORD_LIST:
+
+    st.caption(
+        f"Word database: {len(WORD_LIST):,} words"
+    )
+
+else:
+
+    st.error(
+        "words.txt was not found. "
+        "Please add words.txt to the repository."
+    )
 
 
 # =========================================================
@@ -458,23 +659,21 @@ pattern_tab, clue_tab = st.tabs([
 # PATTERN SEARCH
 # =========================================================
 
-# =========================================================
-# PATTERN SEARCH
-# =========================================================
-
 with pattern_tab:
 
-    st.subheader("Find words from a pattern")
+    st.subheader(
+        "Find words from a pattern"
+    )
 
     pattern = st.text_input(
         "Pattern",
-        placeholder="Example: C_T or C?T",
+        placeholder="Example: C?T",
         key="pattern"
     )
 
     st.caption(
         "Use ? or _ for an unknown letter. "
-        "Example: C?T or C_T"
+        "Letters are fixed. Example: C?T or C_T"
     )
 
     if st.button(
@@ -492,17 +691,18 @@ with pattern_tab:
         else:
 
             matches = find_candidates(
-                pattern.strip()
+                pattern.strip(),
+                PATTERN_RESULT_LIMIT
             )
 
-            # Save results so they survive Streamlit reruns
-            st.session_state["pattern_matches"] = matches
+            # Save results in session state
+            st.session_state[
+                "pattern_matches"
+            ] = matches
 
-            # Remember which pattern was searched
-            st.session_state["searched_pattern"] = pattern.strip()
-
-            # Reset meanings when doing a new search
-            st.session_state["show_meanings"] = {}
+            st.session_state[
+                "searched_pattern"
+            ] = pattern.strip().lower()
 
     # -----------------------------------------------------
     # DISPLAY SAVED RESULTS
@@ -513,53 +713,89 @@ with pattern_tab:
         []
     )
 
+    searched_pattern = st.session_state.get(
+        "searched_pattern",
+        ""
+    )
+
     if matches:
 
         st.success(
-            f"Found {len(matches)} matching words."
+            f"Showing top {len(matches)} "
+            f"matches for **{searched_pattern.upper()}**"
         )
 
-        st.write(
-            "Click **Meaning** for any word you want to investigate."
+        st.caption(
+            "Results are ranked by estimated "
+            "English word commonness."
         )
 
-        for index, word in enumerate(matches, 1):
+        # -------------------------------------------------
+        # RESULTS
+        # -------------------------------------------------
 
-            col1, col2 = st.columns([3, 1])
+        for index, word in enumerate(
+            matches,
+            1
+        ):
+
+            col1, col2 = st.columns(
+                [4, 1]
+            )
 
             with col1:
 
                 st.markdown(
-                    f"**{word.upper()}**"
+                    f"**{index}. {word.upper()}**"
                 )
 
             with col2:
 
+                # Use an expander-style button
+                # but preserve results in session state
+
+                show_key = (
+                    f"meaning_visible_{word}"
+                )
+
                 if st.button(
                     "Meaning",
-                    key=f"meaning_{word}_{index}"
+                    key=f"meaning_button_{word}_{index}"
                 ):
 
                     st.session_state[
-                        "show_meanings"
-                    ][word] = True
+                        show_key
+                    ] = not st.session_state.get(
+                        show_key,
+                        False
+                    )
 
             # -------------------------------------------------
-            # SHOW MEANING IF REQUESTED
+            # MEANING
             # -------------------------------------------------
 
             if st.session_state.get(
-                "show_meanings",
-                {}
-            ).get(word, False):
+                show_key,
+                False
+            ):
 
-                meaning = get_meaning(word)
+                meaning = get_meaning(
+                    word
+                )
 
                 st.caption(
                     f"📖 {meaning}"
                 )
 
             st.divider()
+
+    elif searched_pattern:
+
+        st.info(
+            f"No words found for "
+            f"**{searched_pattern.upper()}**."
+        )
+
 
 # =========================================================
 # AI CLUE SOLVER
@@ -584,8 +820,7 @@ with clue_tab:
     )
 
     st.caption(
-        "Providing the pattern gives "
-        "much better results."
+        "Use ? or _ for unknown letters."
     )
 
     if st.button(
@@ -615,6 +850,10 @@ with clue_tab:
 
         else:
 
+            # -------------------------------------------------
+            # FIND CANDIDATES
+            # -------------------------------------------------
+
             with st.spinner(
                 "Finding possible answers..."
             ):
@@ -635,8 +874,12 @@ with clue_tab:
 
                 st.caption(
                     f"Found {len(candidates)} "
-                    "possible answers."
+                    "possible candidates."
                 )
+
+                # -------------------------------------------------
+                # AI RANKING
+                # -------------------------------------------------
 
                 with st.spinner(
                     "AI is ranking the candidates..."
@@ -666,15 +909,15 @@ with clue_tab:
                             f"{word.upper()}"
                         )
 
-                        if result.get("reason"):
+                        if result.get(
+                            "reason"
+                        ):
 
                             st.write(
                                 f"💡 {result['reason']}"
                             )
 
-                        # Meaning is retrieved
-                        # only for AI-selected words
-
+                        # Meaning is still cached
                         meaning = get_meaning(
                             word
                         )
@@ -699,5 +942,5 @@ with clue_tab:
 
 st.caption(
     "🧩 Pattern search works without AI. "
-    "AI is used only for clue interpretation."
+    "🤖 AI is used only for clue interpretation."
 )
