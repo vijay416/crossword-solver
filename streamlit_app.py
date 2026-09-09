@@ -101,6 +101,18 @@ def load_words():
 
 
 WORD_LIST = load_words()
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+if "pattern_matches" not in st.session_state:
+    st.session_state["pattern_matches"] = []
+
+if "searched_pattern" not in st.session_state:
+    st.session_state["searched_pattern"] = ""
+
+if "show_meanings" not in st.session_state:
+    st.session_state["show_meanings"] = {}
 
 
 # =========================================================
@@ -446,11 +458,13 @@ pattern_tab, clue_tab = st.tabs([
 # PATTERN SEARCH
 # =========================================================
 
+# =========================================================
+# PATTERN SEARCH
+# =========================================================
+
 with pattern_tab:
 
-    st.subheader(
-        "Find words from a pattern"
-    )
+    st.subheader("Find words from a pattern")
 
     pattern = st.text_input(
         "Pattern",
@@ -481,65 +495,71 @@ with pattern_tab:
                 pattern.strip()
             )
 
-            if not matches:
+            # Save results so they survive Streamlit reruns
+            st.session_state["pattern_matches"] = matches
 
-                st.info(
-                    "No matching words found."
+            # Remember which pattern was searched
+            st.session_state["searched_pattern"] = pattern.strip()
+
+            # Reset meanings when doing a new search
+            st.session_state["show_meanings"] = {}
+
+    # -----------------------------------------------------
+    # DISPLAY SAVED RESULTS
+    # -----------------------------------------------------
+
+    matches = st.session_state.get(
+        "pattern_matches",
+        []
+    )
+
+    if matches:
+
+        st.success(
+            f"Found {len(matches)} matching words."
+        )
+
+        st.write(
+            "Click **Meaning** for any word you want to investigate."
+        )
+
+        for index, word in enumerate(matches, 1):
+
+            col1, col2 = st.columns([3, 1])
+
+            with col1:
+
+                st.markdown(
+                    f"**{word.upper()}**"
                 )
 
-            else:
+            with col2:
 
-                st.success(
-                    f"Found {len(matches)} "
-                    f"matching words."
-                )
-
-                st.write(
-                    "Click **Show meaning** "
-                    "only for words you want to investigate."
-                )
-
-                for index, word in enumerate(
-                    matches,
-                    1
+                if st.button(
+                    "Meaning",
+                    key=f"meaning_{word}_{index}"
                 ):
 
-                    col1, col2 = st.columns(
-                        [3, 1]
-                    )
+                    st.session_state[
+                        "show_meanings"
+                    ][word] = True
 
-                    with col1:
+            # -------------------------------------------------
+            # SHOW MEANING IF REQUESTED
+            # -------------------------------------------------
 
-                        st.markdown(
-                            f"**{word.upper()}**"
-                        )
+            if st.session_state.get(
+                "show_meanings",
+                {}
+            ).get(word, False):
 
-                    with col2:
+                meaning = get_meaning(word)
 
-                        if st.button(
-                            "Meaning",
-                            key=f"meaning_{word}_{index}"
-                        ):
+                st.caption(
+                    f"📖 {meaning}"
+                )
 
-                            st.session_state[
-                                f"show_{word}"
-                            ] = True
-
-                    if st.session_state.get(
-                        f"show_{word}",
-                        False
-                    ):
-
-                        meaning = get_meaning(
-                            word
-                        )
-
-                        st.caption(
-                            f"📖 {meaning}"
-                        )
-
-                    st.divider()
-
+            st.divider()
 
 # =========================================================
 # AI CLUE SOLVER
