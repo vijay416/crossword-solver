@@ -108,45 +108,43 @@ WORD_LIST = load_words()
 # =========================================================
 
 def pattern_to_regex(pattern):
-
     """
-    Crossword pattern:
+    Convert crossword pattern to regex.
 
-    _ or ? = unknown character
+    Rules:
+        ? = unknown letter
+        _ = unknown letter
+        letters/numbers = fixed characters
+        - = literal hyphen
+        ' = literal apostrophe
 
     Examples:
-
-        C_T
-        C?T
-        ??T??
+        C_T  -> CAT, COT, CUT
+        C?T  -> CAT, COT, CUT
+        ??A? -> four-letter words with A in position 3
     """
 
     regex_parts = []
 
     for ch in pattern.lower():
 
-        if ch in ["_", "?"]:
-
+        if ch in ["?", "_"]:
+            # One unknown character
             regex_parts.append(".")
 
         elif ch.isalnum():
-
+            # Known letter/number
             regex_parts.append(ch)
 
         elif ch in ["-", "'"]:
-
-            regex_parts.append(
-                re.escape(ch)
-            )
+            # Literal punctuation
+            regex_parts.append(re.escape(ch))
 
         else:
-
-            regex_parts.append(
-                re.escape(ch)
-            )
+            # Escape any other character
+            regex_parts.append(re.escape(ch))
 
     return "^" + "".join(regex_parts) + "$"
-
 
 def find_candidates(
     pattern,
@@ -461,7 +459,8 @@ with pattern_tab:
     )
 
     st.caption(
-        "_ or ? = one unknown letter"
+        "Use ? or _ for an unknown letter. "
+        "Example: C?T or C_T"
     )
 
     if st.button(
@@ -560,7 +559,7 @@ with clue_tab:
 
     ai_pattern = st.text_input(
         "Pattern",
-        placeholder="Example: C_T",
+        placeholder="Example: C?T",
         key="ai_pattern"
     )
 
