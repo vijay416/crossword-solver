@@ -1,11 +1,10 @@
+import streamlit as st
 import json
-import os
 import re
+import math
 from collections import Counter
 
-import streamlit as st
-
-# Optional word frequency package
+# wordfreq is optional but recommended
 try:
     from wordfreq import zipf_frequency
     WORDFREQ_AVAILABLE = True
@@ -17,10 +16,9 @@ except ImportError:
 # CONFIGURATION
 # ============================================================
 
-WORD_FILE = "words.txt"
+WORDS_FILE = "words.txt"
 DICTIONARY_FILE = "dictionary.json"
 
-MAX_WORD_LENGTH = 9
 MAX_PATTERN_RESULTS = 20
 MAX_CLUE_RESULTS = 20
 
@@ -32,594 +30,478 @@ MAX_CLUE_RESULTS = 20
 st.set_page_config(
     page_title="Crossword Solver",
     page_icon="🧩",
-    layout="wide",
+    layout="wide"
 )
 
 
 # ============================================================
-# CUSTOM CSS
+# CSS
 # ============================================================
 
 st.markdown(
     """
     <style>
 
-    /* Smaller pattern result text */
     .crossword-word {
-        font-size: 18px;
+        font-size: 17px;
         font-weight: 600;
-        margin: 0;
-        padding-top: 3px;
+        line-height: 1.25;
     }
 
     .crossword-rank {
-        font-size: 14px;
+        font-size: 12px;
         color: #777;
-        padding-top: 5px;
     }
 
     .crossword-definition {
-        font-size: 14px;
-        line-height: 1.35;
-        padding-top: 4px;
-    }
-
-    .crossword-no-definition {
         font-size: 13px;
-        color: #888;
-        padding-top: 5px;
+        line-height: 1.3;
+        padding-top: 3px;
     }
 
-    /* Reduce spacing between result rows */
-    div[data-testid="stHorizontalBlock"] {
-        margin-bottom: 2px;
+    .crossword-pos {
+        font-size: 11px;
+        color: #777;
+        font-style: italic;
+    }
+
+    .clue-result-word {
+        font-size: 17px;
+        font-weight: 600;
+    }
+
+    .clue-result-definition {
+        font-size: 13px;
+        line-height: 1.35;
     }
 
     </style>
     """,
-    unsafe_allow_html=True,
+    unsafe_allow_html=True
 )
 
 
 # ============================================================
-# LOAD WORD LIST
+# WORD LIST LOADER
 # ============================================================
 
 @st.cache_data
 def load_words():
+    """
+    Load the COMPLETE words.txt.
 
-    if not os.path.exists(WORD_FILE):
-        return []
+    Supports:
+      ABC
+      AARD-VARK
+      AARON'SROD
+
+    The original capitalization is normalized internally.
+    Display remains uppercase.
+    """
 
     words = []
     seen = set()
 
-    with open(
-        WORD_FILE,
-        "r",
-        encoding="utf-8",
-        errors="ignore",
-    ) as f:
+    try:
+        with open(WORDS_FILE, "r", encoding="utf-8", errors="ignore") as f:
 
-        for line in f:
+            for line in f:
+                word = line.strip()
 
-            word = line.strip().upper()
+                if not word:
+                    continue
 
-            if not word:
-                continue
+                # Normalize to uppercase
+                word = word.upper()
 
-            # Current words.txt is expected to contain
-            # alphabetic crossword entries.
-            if not word.isalpha():
-                continue
+                # Valid crossword characters:
+                # A-Z, apostrophe and hyphen.
+                #
+                # This intentionally DOES NOT use .isalpha()
+                # because entries such as AARD-VARK and
+                # AARON'SROD are valid in the supplied list.
+                if not re.fullmatch(r"[A-Z]+(?:[-'][A-Z]+)*", word):
+                    continue
 
-            if len(word) < 3 or len(word) > MAX_WORD_LENGTH:
-                continue
+                if word not in seen:
+                    seen.add(word)
+                    words.append(word)
 
-            if word not in seen:
-
-                seen.add(word)
-                words.append(word)
+    except FileNotFoundError:
+        st.error(
+            f"Could not find {WORDS_FILE}. "
+            "Make sure it is in the same repository as streamlit_app.py."
+        )
+        return []
 
     return words
 
 
-WORDS = load_words()
-
-# Set gives much faster validation for clue results
-WORD_SET = set(WORDS)
-
-
 # ============================================================
-# LOAD LOCAL DICTIONARY
+# DICTIONARY LOADER
 # ============================================================
 
-@st.cache_resource
+@st.cache_data
 def load_dictionary():
+    """
+    Load local dictionary.json.
 
-    if not os.path.exists(DICTIONARY_FILE):
-        return {}
+    Supports either:
+
+    "word": "definition"
+
+    OR
+
+    "word": {
+        "definition": "...",
+        "part_of_speech": "noun"
+    }
+    """
 
     try:
+        with open(DICTIONARY_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            raw = json.load(f)
 
-        with open(
-            DICTIONARY_FILE,
-            "r",
-            encoding="utf-8",
-            errors="ignore",
-        ) as f:
-
-            raw_dictionary = json.load(f)
-
-        dictionary = {}
-
-        for key, value in raw_dictionary.items():
-
-            word = str(key).strip().lower()
-
-            if not word:
-                continue
-
-            # Standard format:
-            #
-            # "word": "definition"
-
-            if isinstance(value, str):
-
-                definition = value.strip()
-
-            # Also support:
-            #
-            # "word": {
-            #     "definition": "...",
-            #     "part_of_speech": "noun"
-            # }
-
-            elif isinstance(value, dict):
-
-                if "definition" in value:
-
-                    definition = str(
-                        value["definition"]
-                    ).strip()
-
-                elif "definitions" in value:
-
-                    definitions = value["definitions"]
-
-                    if isinstance(
-                        definitions,
-                        list,
-                    ):
-
-                        definition = " ".join(
-                            str(x).strip()
-                            for x in definitions
-                            if str(x).strip()
-                        )
-
-                    else:
-
-                        definition = str(
-                            definitions
-                        ).strip()
-
-                else:
-
-                    definition = ""
-
-            elif isinstance(value, list):
-
-                definition = " ".join(
-                    str(x).strip()
-                    for x in value
-                    if str(x).strip()
-                )
-
-            else:
-
-                definition = str(value).strip()
-
-            if definition:
-
-                dictionary[word] = definition
-
-        return dictionary
-
-    except Exception as e:
-
+    except FileNotFoundError:
         st.error(
-            f"Could not load dictionary.json: {e}"
+            f"Could not find {DICTIONARY_FILE}. "
+            "Make sure it is in the same repository as streamlit_app.py."
         )
-
         return {}
 
+    except json.JSONDecodeError as e:
+        st.error(f"Could not read {DICTIONARY_FILE}: {e}")
+        return {}
 
-DICTIONARY = load_dictionary()
+    dictionary = {}
+
+    for key, value in raw.items():
+
+        word = str(key).strip().lower()
+
+        if not word:
+            continue
+
+        if isinstance(value, str):
+
+            dictionary[word] = {
+                "definition": value,
+                "part_of_speech": ""
+            }
+
+        elif isinstance(value, dict):
+
+            definition = value.get("definition", "")
+
+            # Also support definitions as a list
+            if isinstance(definition, list):
+                definition = " ".join(
+                    str(x) for x in definition if x
+                )
+
+            dictionary[word] = {
+                "definition": str(definition),
+                "part_of_speech": str(
+                    value.get("part_of_speech", "")
+                )
+            }
+
+        else:
+            dictionary[word] = {
+                "definition": str(value),
+                "part_of_speech": ""
+            }
+
+    return dictionary
 
 
 # ============================================================
-# COMMON WORD / RANKING DATA
+# WORD NORMALIZATION
 # ============================================================
 
-COMMON_LETTERS = set(
-    "ETAOINSHRDLU"
-)
+def normalized_word(word):
+    """
+    Normalize a crossword word for matching/scoring.
 
-COMMON_SHORT_WORDS = {
-    "AND",
-    "THE",
-    "FOR",
-    "ARE",
-    "BUT",
-    "NOT",
-    "YOU",
-    "ALL",
-    "CAN",
-    "HER",
-    "WAS",
-    "ONE",
-    "OUT",
-    "HAS",
-    "HAD",
-    "HIS",
-    "WHO",
-    "HOW",
-    "NEW",
-    "NOW",
-    "OLD",
-    "ANY",
-    "TWO",
-    "WAY",
-    "DAY",
-    "MAN",
-    "MEN",
-    "DID",
-    "GET",
-    "LET",
-    "SAY",
-    "SHE",
-    "OUR",
-    "USE",
-    "OWN",
-    "SEE",
-    "TOO",
-}
+    AARD-VARK -> aard-vark
+    AARON'SROD -> aaron'srod
+    """
+
+    return word.lower()
+
+
+def letters_only(word):
+    """
+    Remove punctuation for frequency scoring.
+
+    AARD-VARK -> aardvark
+    AARON'SROD -> aaronsrod
+    """
+
+    return re.sub(r"[^a-z]", "", word.lower())
+
+
+# ============================================================
+# PATTERN -> REGEX
+# ============================================================
+
+def pattern_to_regex(pattern):
+    """
+    Crossword pattern rules:
+
+      ? = one unknown character
+      _ = one unknown character
+
+      A-Z = fixed letter
+      -   = literal hyphen
+      '   = literal apostrophe
+
+    Example:
+
+      C?? = CAT, CAR, CAN...
+
+      A_RD = AARD
+
+      AARD-V_RK = AARD-VARK
+    """
+
+    pattern = pattern.strip().upper()
+
+    regex_parts = []
+
+    for ch in pattern:
+
+        if ch in ["?", "_"]:
+            regex_parts.append(".")
+
+        elif ch.isalpha():
+            regex_parts.append(re.escape(ch))
+
+        elif ch in ["-", "'"]:
+            regex_parts.append(re.escape(ch))
+
+        else:
+            regex_parts.append(re.escape(ch))
+
+    return "^" + "".join(regex_parts) + "$"
+
+
+# ============================================================
+# WORD FREQUENCY
+# ============================================================
+
+def frequency_score(word):
+    """
+    Return a commonness score.
+
+    wordfreq:
+      Zipf scale is approximately 1-8.
+
+    For crossword ranking, common words get a higher score,
+    but obscure words are NOT removed.
+    """
+
+    clean = letters_only(word)
+
+    if not clean:
+        return 0.0
+
+    if WORDFREQ_AVAILABLE:
+
+        try:
+            return float(
+                zipf_frequency(clean, "en")
+            )
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # Fallback heuristic
+    # --------------------------------------------------------
+
+    common_words = {
+        "THE", "AND", "FOR", "ARE", "BUT", "NOT",
+        "YOU", "ALL", "CAN", "HER", "WAS", "ONE",
+        "OUR", "OUT", "DAY", "GET", "HAS", "HAD",
+        "HIS", "HOW", "MAN", "NEW", "NOW", "OLD",
+        "SEE", "TWO", "WAY", "WHO", "BOY", "DID",
+        "ITS", "LET", "PUT", "SAY", "SHE", "TOO",
+        "USE", "YES"
+    }
+
+    if word.upper() in common_words:
+        return 7.0
+
+    length = len(clean)
+
+    if length <= 3:
+        return 5.5
+
+    if length <= 5:
+        return 5.0
+
+    if length <= 7:
+        return 4.5
+
+    if length <= 9:
+        return 4.0
+
+    return 3.5
 
 
 # ============================================================
 # CROSSWORD RANKING
 # ============================================================
 
-def word_frequency_score(word):
+COMMON_LETTERS = set(
+    "ETAOINSHRDLU"
+)
 
-    lower_word = word.lower()
 
-    if WORDFREQ_AVAILABLE:
+def crossword_score(word, dictionary):
+    """
+    Rank a word for crossword usefulness.
 
-        return zipf_frequency(
-            lower_word,
-            "en",
-        )
-
-    # Fallback if wordfreq is unavailable
+    Important:
+      This function ranks words.
+      It does NOT eliminate words.
+    """
 
     score = 0.0
 
-    if lower_word in DICTIONARY:
-        score += 5.0
+    # --------------------------------------------------------
+    # Commonness
+    # --------------------------------------------------------
 
-    common_count = sum(
-        1
-        for char in word
-        if char in COMMON_LETTERS
-    )
+    freq = frequency_score(word)
 
-    score += common_count * 0.15
+    score += freq * 10.0
 
-    vowels = sum(
-        1
-        for char in word
-        if char in "AEIOU"
-    )
-
-    if len(word) >= 4:
-
-        ratio = vowels / len(word)
-
-        if 0.20 <= ratio <= 0.60:
-            score += 1.0
-
-    if word in COMMON_SHORT_WORDS:
-        score += 2.0
-
-    return score
-
-
-def crossword_score(word):
-
-    score = word_frequency_score(word)
-
-    lower_word = word.lower()
-
+    # --------------------------------------------------------
     # Dictionary presence
-    if lower_word in DICTIONARY:
-        score += 2.0
+    # --------------------------------------------------------
 
-    # Length
-    length_bonus = {
-        3: 0.20,
-        4: 0.45,
-        5: 0.65,
-        6: 0.55,
-        7: 0.45,
-        8: 0.30,
-        9: 0.20,
-    }
+    if normalized_word(word) in dictionary:
+        score += 18.0
 
-    score += length_bonus.get(
-        len(word),
-        0,
-    )
+    # --------------------------------------------------------
+    # Short-word bonus
+    #
+    # Short words are particularly useful in crosswords.
+    # --------------------------------------------------------
 
+    clean = letters_only(word)
+    length = len(clean)
+
+    if length == 2:
+        score += 16
+
+    elif length == 3:
+        score += 12
+
+    elif length == 4:
+        score += 8
+
+    elif length == 5:
+        score += 5
+
+    elif length == 6:
+        score += 3
+
+    # --------------------------------------------------------
+    # Common-letter bonus
+    # --------------------------------------------------------
+
+    if clean:
+
+        common_count = sum(
+            1 for c in clean.upper()
+            if c in COMMON_LETTERS
+        )
+
+        score += common_count * 0.5
+
+    # --------------------------------------------------------
     # Vowel balance
-    vowels = sum(
-        1
-        for char in word
-        if char in "AEIOU"
-    )
+    # --------------------------------------------------------
 
-    if len(word) >= 4:
+    if clean:
 
-        vowel_ratio = vowels / len(word)
+        vowels = sum(
+            1 for c in clean
+            if c in "aeiou"
+        )
 
-        if 0.20 <= vowel_ratio <= 0.60:
-            score += 0.60
+        ratio = vowels / len(clean)
 
-        elif vowel_ratio < 0.10:
-            score -= 0.80
+        # Reward reasonable vowel balance
+        if 0.20 <= ratio <= 0.55:
+            score += 2.5
 
-    # Common letters
-    common_count = sum(
-        1
-        for char in word
-        if char in COMMON_LETTERS
-    )
+        elif ratio < 0.10:
+            score -= 2.0
 
-    score += common_count * 0.08
+    # --------------------------------------------------------
+    # Punctuation penalty
+    #
+    # Keep these words, but slightly lower them.
+    # --------------------------------------------------------
 
-    # Excessive consonant clusters
-    if re.search(
-        r"[BCDFGHJKLMNPQRSTVWXYZ]{4,}",
-        word,
-    ):
-        score -= 1.0
+    if "-" in word:
+        score -= 3.0
 
-    if re.search(
-        r"[BCDFGHJKLMNPQRSTVWXYZ]{5,}",
-        word,
-    ):
-        score -= 1.5
-
-    # Repeated letters
-    repeated = (
-        len(word)
-        - len(set(word))
-    )
-
-    if repeated >= 3:
-        score -= 0.30
-
-    # Slight inflection penalty
-    if len(word) >= 6:
-
-        if word.endswith("ING"):
-            score -= 0.10
-
-        elif word.endswith("ED"):
-            score -= 0.08
-
-        elif word.endswith("ES"):
-            score -= 0.06
+    if "'" in word:
+        score -= 2.0
 
     return score
 
 
-def rank_matches(matches):
-
-    scored = []
-
-    for word in matches:
-
-        scored.append(
-            (
-                crossword_score(word),
-                word,
-            )
-        )
-
-    scored.sort(
-        key=lambda x: (
-            -x[0],
-            x[1],
-        )
-    )
-
-    return [
-        word
-        for score, word in scored
-    ]
-
-
 # ============================================================
-# PATTERN MATCHING
+# PATTERN SEARCH
 # ============================================================
 
-def pattern_to_regex(pattern):
+def find_pattern_matches(pattern, words, dictionary):
 
-    parts = []
-
-    for ch in pattern.strip():
-
-        if ch in ["?", "_"]:
-
-            # One unknown character
-            parts.append(".")
-
-        elif ch.isalnum():
-
-            parts.append(
-                re.escape(
-                    ch.upper()
-                )
-            )
-
-        elif ch in ["-", "'"]:
-
-            parts.append(
-                re.escape(ch)
-            )
-
-        else:
-
-            parts.append(
-                re.escape(ch)
-            )
-
-    return "^" + "".join(parts) + "$"
-
-
-def find_pattern_matches(pattern):
-
-    if not pattern.strip():
-        return []
-
-    regex_string = pattern_to_regex(
-        pattern
-    )
+    regex_string = pattern_to_regex(pattern)
 
     try:
-
-        regex = re.compile(
-            regex_string
-        )
-
+        regex = re.compile(regex_string)
     except re.error:
-
         return []
 
-    matches = [
-        word
-        for word in WORDS
-        if regex.fullmatch(word)
-    ]
+    matches = []
 
-    return rank_matches(
-        matches
+    for word in words:
+
+        if regex.fullmatch(word):
+
+            score = crossword_score(
+                word,
+                dictionary
+            )
+
+            matches.append(
+                (word, score)
+            )
+
+    matches.sort(
+        key=lambda x: (-x[1], x[0])
     )
 
-
-# ============================================================
-# LOCAL MEANING
-# ============================================================
-
-def get_meaning(word):
-
-    return DICTIONARY.get(
-        word.strip().lower()
-    )
-
-
-def shorten_definition(
-    definition,
-    max_chars=300,
-):
-
-    if not definition:
-        return "Definition unavailable."
-
-    definition = re.sub(
-        r"\s+",
-        " ",
-        definition,
-    ).strip()
-
-    if len(definition) <= max_chars:
-        return definition
-
-    sentences = re.split(
-        r"(?<=[.!?])\s+",
-        definition,
-    )
-
-    if sentences:
-
-        first = sentences[0].strip()
-
-        if len(first) <= max_chars:
-            return first
-
-    shortened = definition[
-        :max_chars
-    ]
-
-    if " " in shortened:
-
-        shortened = shortened.rsplit(
-            " ",
-            1,
-        )[0]
-
-    return shortened + "…"
+    return matches[:MAX_PATTERN_RESULTS]
 
 
 # ============================================================
-# DICTIONARY-ONLY CLUE SEARCH
+# TOKENIZATION
 # ============================================================
 
-# Common English words that don't add much meaning
-# when comparing a clue with dictionary definitions.
-
-STOP_WORDS = {
-    "a",
-    "an",
-    "the",
-    "of",
-    "to",
-    "in",
-    "on",
-    "at",
-    "for",
-    "from",
-    "with",
-    "by",
-    "and",
-    "or",
-    "but",
-    "is",
-    "are",
-    "was",
-    "were",
-    "be",
-    "been",
-    "being",
-    "as",
-    "this",
-    "that",
-    "these",
-    "those",
-    "its",
-    "it",
-    "their",
-    "his",
-    "her",
-    "his",
-    "used",
-    "use",
-    "one",
-    "someone",
-    "something",
-    "person",
+STOPWORDS = {
+    "a", "an", "the", "of", "to", "in",
+    "on", "for", "with", "and", "or",
+    "is", "are", "was", "were", "be",
+    "by", "from", "as", "at", "into",
+    "that", "this", "it", "its",
+    "one", "used", "use"
 }
 
 
@@ -627,280 +509,281 @@ def tokenize(text):
 
     words = re.findall(
         r"[a-z]+",
-        text.lower(),
+        text.lower()
     )
 
     return [
-        word
-        for word in words
-        if word not in STOP_WORDS
-        and len(word) >= 2
+        w for w in words
+        if w not in STOPWORDS and len(w) > 1
     ]
 
 
-def clue_score(
-    clue_tokens,
-    definition,
-    word,
-):
+# ============================================================
+# DICTIONARY CLUE SEARCH
+# ============================================================
 
-    definition_lower = (
-        definition.lower()
-    )
+@st.cache_data
+def build_dictionary_search_index(dictionary):
 
-    definition_tokens = set(
-        tokenize(definition)
-    )
+    """
+    Build a lightweight reverse index:
 
-    if not clue_tokens:
-        return 0.0
+       definition word -> dictionary words
 
-    # --------------------------------------------------------
-    # Direct token overlap
-    # --------------------------------------------------------
+    This avoids repeatedly scanning the entire 22 MB
+    dictionary for every clue.
+    """
 
-    overlap = sum(
-        1
-        for token in clue_tokens
-        if token in definition_tokens
-    )
+    index = {}
 
-    score = overlap * 10.0
+    for dictionary_word, info in dictionary.items():
 
-    # --------------------------------------------------------
-    # Exact phrase bonus
-    # --------------------------------------------------------
+        definition = info.get(
+            "definition",
+            ""
+        )
 
-    clue_phrase = " ".join(
-        clue_tokens
-    )
+        tokens = set(
+            tokenize(definition)
+        )
 
-    if clue_phrase in definition_lower:
+        for token in tokens:
 
-        score += 20.0
+            if token not in index:
+                index[token] = set()
 
-    # --------------------------------------------------------
-    # Individual clue word occurrence
-    # --------------------------------------------------------
+            index[token].add(
+                dictionary_word
+            )
 
-    for token in clue_tokens:
-
-        if token in definition_lower:
-
-            score += 2.0
-
-    # --------------------------------------------------------
-    # Definition length penalty
-    #
-    # This helps avoid very long definitions that happen
-    # to contain many common words.
-    # --------------------------------------------------------
-
-    if len(definition) > 500:
-
-        score -= 0.5
-
-    if len(definition) > 1000:
-
-        score -= 0.5
-
-    # --------------------------------------------------------
-    # Dictionary-backed answer bonus
-    # --------------------------------------------------------
-
-    if word.lower() in DICTIONARY:
-
-        score += 1.0
-
-    return score
+    return index
 
 
 def search_dictionary_for_clue(
     clue,
-    pattern=None,
+    pattern,
+    words,
+    dictionary,
+    dictionary_index
 ):
 
-    clue_tokens = tokenize(
-        clue
-    )
+    clue_tokens = tokenize(clue)
 
     if not clue_tokens:
         return []
 
     # --------------------------------------------------------
-    # If pattern supplied, restrict dictionary search to
-    # matching words first.
+    # Candidate dictionary words
     # --------------------------------------------------------
 
-    if pattern and pattern.strip():
+    candidate_words = set()
 
-        candidate_words = (
-            find_pattern_matches(
-                pattern
+    for token in clue_tokens:
+
+        if token in dictionary_index:
+
+            candidate_words.update(
+                dictionary_index[token]
             )
+
+    # --------------------------------------------------------
+    # Restrict to actual crossword words
+    # --------------------------------------------------------
+
+    word_set = {
+        normalized_word(w)
+        for w in words
+    }
+
+    candidate_words &= word_set
+
+    # --------------------------------------------------------
+    # Apply pattern if supplied
+    # --------------------------------------------------------
+
+    if pattern.strip():
+
+        regex_string = pattern_to_regex(
+            pattern
         )
 
-    else:
+        try:
+            regex = re.compile(
+                regex_string,
+                re.IGNORECASE
+            )
 
-        # Only search words that are both:
-        # 1. in words.txt
-        # 2. in dictionary.json
-        #
-        # This prevents dictionary-only words that aren't
-        # valid crossword candidates from appearing.
+            candidate_words = {
+                w for w in candidate_words
+                if regex.fullmatch(w)
+            }
 
-        candidate_words = [
-            word
-            for word in WORDS
-            if word.lower()
-            in DICTIONARY
-        ]
+        except re.error:
+            return []
 
-    scored = []
+    # --------------------------------------------------------
+    # Score candidates
+    # --------------------------------------------------------
 
-    for word in candidate_words:
+    results = []
 
-        definition = DICTIONARY.get(
-            word.lower()
+    for candidate in candidate_words:
+
+        info = dictionary.get(
+            candidate,
+            {}
+        )
+
+        definition = info.get(
+            "definition",
+            ""
         )
 
         if not definition:
             continue
 
-        score = clue_score(
-            clue_tokens,
-            definition,
-            word,
+        definition_lower = definition.lower()
+
+        score = 0.0
+
+        # ----------------------------------------------------
+        # Exact phrase bonus
+        # ----------------------------------------------------
+
+        clue_lower = clue.lower().strip()
+
+        if clue_lower in definition_lower:
+            score += 30
+
+        # ----------------------------------------------------
+        # Token overlap
+        # ----------------------------------------------------
+
+        definition_tokens = tokenize(
+            definition
         )
 
-        # Only keep entries with some evidence of relevance
-        if score > 0:
+        definition_counter = Counter(
+            definition_tokens
+        )
 
-            scored.append(
-                (
-                    score,
-                    word,
-                    definition,
-                )
+        for token in clue_tokens:
+
+            if token in definition_counter:
+
+                score += 10
+
+                # Multiple occurrences
+                score += min(
+                    definition_counter[token] - 1,
+                    3
+                ) * 2
+
+        # ----------------------------------------------------
+        # Length adjustment
+        # ----------------------------------------------------
+
+        if len(candidate) <= 5:
+            score += 2
+
+        # ----------------------------------------------------
+        # Word frequency
+        # ----------------------------------------------------
+
+        score += frequency_score(candidate) * 1.5
+
+        results.append(
+            (
+                candidate.upper(),
+                score,
+                definition,
+                info.get("part_of_speech", "")
             )
-
-    # --------------------------------------------------------
-    # Sort by clue relevance first.
-    #
-    # For equal relevance, use crossword score.
-    # --------------------------------------------------------
-
-    scored.sort(
-        key=lambda x: (
-            -x[0],
-            -crossword_score(x[1]),
-            x[1],
         )
+
+    results.sort(
+        key=lambda x: (-x[1], x[0])
     )
 
-    return scored[
-        :MAX_CLUE_RESULTS
-    ]
+    return results[:MAX_CLUE_RESULTS]
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+words = load_words()
+dictionary = load_dictionary()
+
+dictionary_index = build_dictionary_search_index(
+    dictionary
+)
 
 
 # ============================================================
 # SESSION STATE
 # ============================================================
 
-if (
-    "pattern_matches"
-    not in st.session_state
-):
+if "selected_meaning_word" not in st.session_state:
+    st.session_state.selected_meaning_word = None
 
-    st.session_state.pattern_matches = []
+if "pattern_results" not in st.session_state:
+    st.session_state.pattern_results = []
 
-
-if (
-    "last_pattern"
-    not in st.session_state
-):
-
+if "last_pattern" not in st.session_state:
     st.session_state.last_pattern = ""
 
 
-if (
-    "selected_meaning_word"
-    not in st.session_state
-):
-
-    st.session_state.selected_meaning_word = None
-
-
 # ============================================================
-# HEADER
+# SIDEBAR
 # ============================================================
 
-st.title(
-    "🧩 Crossword Solver"
+st.sidebar.title("🧩 Crossword Solver")
+
+st.sidebar.markdown(
+    f"**Words loaded:** {len(words):,}"
 )
+
+st.sidebar.markdown(
+    f"**Dictionary entries:** {len(dictionary):,}"
+)
+
+st.sidebar.markdown(
+    "### Search rules"
+)
+
+st.sidebar.markdown(
+    """
+    `?` or `_` → unknown letter
+
+    `A-Z` → fixed letter
+
+    `-` → literal hyphen
+
+    `'` → literal apostrophe
+    """
+)
+
+if WORDFREQ_AVAILABLE:
+    st.sidebar.success(
+        "Word-frequency ranking enabled"
+    )
+else:
+    st.sidebar.info(
+        "Using built-in crossword ranking. "
+        "Install `wordfreq` for better commonness ranking."
+    )
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.title("🧩 Crossword Solver")
 
 st.caption(
-    "Pattern matching + local dictionary meanings + dictionary-based clue solving"
+    "Pattern search + local dictionary clue search"
 )
-
-
-# ============================================================
-# STATUS
-# ============================================================
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-
-    st.metric(
-        "Words",
-        f"{len(WORDS):,}",
-    )
-
-with col2:
-
-    st.metric(
-        "Meanings",
-        f"{len(DICTIONARY):,}",
-    )
-
-with col3:
-
-    if WORDFREQ_AVAILABLE:
-
-        st.metric(
-            "Ranking",
-            "Word frequency",
-        )
-
-    else:
-
-        st.metric(
-            "Ranking",
-            "Crossword heuristic",
-        )
-
-
-# ============================================================
-# WARNINGS
-# ============================================================
-
-if not WORDS:
-
-    st.error(
-        "words.txt could not be loaded. "
-        "Make sure it is in the same folder "
-        "as streamlit_app.py."
-    )
-
-
-if not DICTIONARY:
-
-    st.warning(
-        "dictionary.json could not be loaded. "
-        "Pattern search will still work, "
-        "but meanings and clue search will not."
-    )
 
 
 # ============================================================
@@ -910,67 +793,30 @@ if not DICTIONARY:
 tab1, tab2 = st.tabs(
     [
         "🔎 Pattern Search",
-        "📖 Dictionary Clue Solver",
+        "📖 Dictionary Clue Solver"
     ]
 )
 
 
 # ============================================================
-# PATTERN SEARCH
+# TAB 1 — PATTERN SEARCH
 # ============================================================
 
 with tab1:
 
-    st.subheader(
-        "Find words by pattern"
-    )
-
-    st.markdown(
-        """
-**Pattern rules**
-
-- `?` = one unknown letter
-- `_` = one unknown letter
-- Letters = fixed letters
-- `-` = literal hyphen
-- `'` = literal apostrophe
-
-Examples: `C??`, `?A?`, `C??E`
-"""
-    )
+    st.subheader("Pattern Search")
 
     pattern = st.text_input(
         "Enter crossword pattern",
-        placeholder="Example: C??E",
-        key="pattern_input",
+        placeholder="Example: A??E or ?A? or AARD-V_RK",
+        key="pattern_input"
     )
 
-    search_col, clear_col = st.columns(
-        [1, 1]
+    search_clicked = st.button(
+        "🔍 Search",
+        type="primary",
+        key="pattern_search_button"
     )
-
-    with search_col:
-
-        search_clicked = st.button(
-            "🔎 Search",
-            type="primary",
-            use_container_width=True,
-        )
-
-    with clear_col:
-
-        clear_clicked = st.button(
-            "Clear",
-            use_container_width=True,
-        )
-
-    if clear_clicked:
-
-        st.session_state.pattern_matches = []
-        st.session_state.last_pattern = ""
-        st.session_state.selected_meaning_word = None
-
-        st.rerun()
 
     if search_clicked:
 
@@ -980,184 +826,184 @@ Examples: `C??`, `?A?`, `C??E`
                 "Please enter a pattern."
             )
 
+            st.session_state.pattern_results = []
+            st.session_state.last_pattern = ""
+
         else:
 
-            matches = find_pattern_matches(
-                pattern
-            )
+            with st.spinner("Searching word list..."):
 
-            st.session_state.pattern_matches = (
-                matches
-            )
+                results = find_pattern_matches(
+                    pattern,
+                    words,
+                    dictionary
+                )
 
-            st.session_state.last_pattern = (
-                pattern.upper()
-            )
+            st.session_state.pattern_results = results
+            st.session_state.last_pattern = pattern.upper()
 
-            st.session_state.selected_meaning_word = (
-                None
-            )
+            # Reset selected meaning for a new search
+            st.session_state.selected_meaning_word = None
 
     # --------------------------------------------------------
-    # RESULTS
+    # Display previous/current results
     # --------------------------------------------------------
 
-    matches = (
-        st.session_state.pattern_matches
-    )
+    results = st.session_state.pattern_results
 
-    if matches:
+    if results:
 
-        st.success(
-            f"Found {len(matches):,} matching words. "
-            f"Showing the top "
-            f"{min(MAX_PATTERN_RESULTS, len(matches))}."
+        st.markdown(
+            f"**Top {len(results)} possibilities for "
+            f"`{st.session_state.last_pattern}`**"
         )
 
-        st.markdown("---")
-
-        for index, word in enumerate(
-            matches[
-                :MAX_PATTERN_RESULTS
-            ],
-            start=1,
+        for rank, (word, score) in enumerate(
+            results,
+            start=1
         ):
 
-            # Three columns:
-            #
-            # rank | word | meaning
-            #
-            col_rank, col_word, col_meaning = st.columns(
-                [0.5, 2.0, 5.0]
+            col1, col2, col3 = st.columns(
+                [0.10, 0.28, 0.62]
             )
 
-            with col_rank:
+            with col1:
 
                 st.markdown(
-                    f'<div class="crossword-rank">'
-                    f'{index}'
-                    f'</div>',
-                    unsafe_allow_html=True,
+                    f"<div class='crossword-rank'>"
+                    f"#{rank}"
+                    f"</div>",
+                    unsafe_allow_html=True
                 )
 
-            with col_word:
+            with col2:
 
                 st.markdown(
-                    f'<div class="crossword-word">'
-                    f'{word}'
-                    f'</div>',
-                    unsafe_allow_html=True,
+                    f"<div class='crossword-word'>"
+                    f"{word}"
+                    f"</div>",
+                    unsafe_allow_html=True
                 )
 
-            with col_meaning:
+                st.caption(
+                    f"Score: {score:.1f}"
+                )
 
-                # If this word has been selected,
-                # show the meaning HERE.
-                #
-                # This means the user doesn't have
-                # to scroll back to the top.
+            with col3:
+
+                # ------------------------------------------------
+                # Meaning button
+                # ------------------------------------------------
+
+                if st.button(
+                    "Meaning",
+                    key=f"meaning_{rank}_{word}"
+                ):
+
+                    st.session_state.selected_meaning_word = (
+                        word
+                    )
+
+                # ------------------------------------------------
+                # Meaning shown beside the selected word
+                # ------------------------------------------------
 
                 if (
                     st.session_state.selected_meaning_word
                     == word
                 ):
 
-                    definition = get_meaning(
-                        word
+                    dictionary_key = (
+                        normalized_word(word)
                     )
 
-                    if definition:
+                    info = dictionary.get(
+                        dictionary_key
+                    )
 
-                        st.markdown(
-                            '<div class="crossword-definition">'
-                            '<b>Meaning:</b> '
-                            + shorten_definition(
-                                definition
-                            )
-                            + '</div>',
-                            unsafe_allow_html=True,
+                    if info:
+
+                        definition = info.get(
+                            "definition",
+                            ""
                         )
 
-                    else:
-
-                        st.markdown(
-                            '<div class="crossword-no-definition">'
-                            'No local definition available.'
-                            '</div>',
-                            unsafe_allow_html=True,
+                        part_of_speech = info.get(
+                            "part_of_speech",
+                            ""
                         )
 
-                else:
+                        if part_of_speech:
 
-                    if word.lower() in DICTIONARY:
-
-                        if st.button(
-                            "Meaning",
-                            key=(
-                                f"meaning_"
-                                f"{index}_"
-                                f"{word}"
-                            ),
-                        ):
-
-                            st.session_state.selected_meaning_word = (
-                                word
+                            st.markdown(
+                                f"<div class='crossword-pos'>"
+                                f"{part_of_speech}"
+                                f"</div>",
+                                unsafe_allow_html=True
                             )
 
-                            st.rerun()
+                        if definition:
+
+                            st.markdown(
+                                f"<div class='crossword-definition'>"
+                                f"{definition}"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+
+                        else:
+
+                            st.caption(
+                                "Definition not available."
+                            )
 
                     else:
 
                         st.caption(
-                            "No definition"
+                            "Meaning not found in local dictionary."
                         )
-
-            st.divider()
 
     elif st.session_state.last_pattern:
 
         st.info(
-            "No words match this pattern."
+            "No matching words found."
         )
 
 
 # ============================================================
-# DICTIONARY CLUE SOLVER
+# TAB 2 — DICTIONARY CLUE SOLVER
 # ============================================================
 
 with tab2:
 
     st.subheader(
-        "📖 Solve Clue from Dictionary"
+        "Dictionary Clue Solver"
     )
 
-    st.write(
-        "This solver searches your local "
-        "`dictionary.json` definitions. "
-        "It does not use AI."
+    st.caption(
+        "Searches your local dictionary only. "
+        "No AI ranking or external API is used."
     )
 
-    clue = st.text_area(
+    clue = st.text_input(
         "Enter clue",
-        placeholder=(
-            "Example: "
-            "A place where books are kept"
-        ),
-        height=100,
+        placeholder="Example: Small domesticated feline",
+        key="clue_input"
     )
 
     clue_pattern = st.text_input(
-        "Pattern (optional)",
-        placeholder="Example: L?BR?RY",
+        "Optional pattern",
+        placeholder="Example: C??",
+        key="clue_pattern_input"
     )
 
-    solve_button = st.button(
+    clue_search_clicked = st.button(
         "📖 Search Dictionary",
         type="primary",
-        use_container_width=True,
+        key="clue_search_button"
     )
 
-    if solve_button:
+    if clue_search_clicked:
 
         if not clue.strip():
 
@@ -1168,142 +1014,89 @@ with tab2:
         else:
 
             with st.spinner(
-                "Searching dictionary..."
+                "Searching local dictionary..."
             ):
 
                 clue_results = (
                     search_dictionary_for_clue(
-                        clue=clue,
-                        pattern=clue_pattern,
+                        clue,
+                        clue_pattern,
+                        words,
+                        dictionary,
+                        dictionary_index
                     )
                 )
 
             if not clue_results:
 
                 st.info(
-                    "No strong dictionary matches "
-                    "were found."
+                    "No strong dictionary matches found."
                 )
 
             else:
 
-                st.success(
-                    f"Found {len(clue_results)} "
-                    "possible answers."
+                st.markdown(
+                    f"**Top {len(clue_results)} "
+                    f"dictionary matches**"
                 )
 
-                st.markdown("---")
-
-                for index, (
-                    score,
-                    word,
-                    definition,
+                for (
+                    rank,
+                    (
+                        word,
+                        score,
+                        definition,
+                        part_of_speech
+                    )
                 ) in enumerate(
                     clue_results,
-                    start=1,
+                    start=1
                 ):
 
-                    col_rank, col_answer, col_definition = (
-                        st.columns(
-                            [0.5, 1.8, 6]
-                        )
+                    st.markdown(
+                        f"""
+                        <div class="clue-result-word">
+                            #{rank} &nbsp; {word}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
                     )
 
-                    with col_rank:
+                    if part_of_speech:
 
                         st.markdown(
-                            f'<div class="crossword-rank">'
-                            f'{index}'
-                            f'</div>',
-                            unsafe_allow_html=True,
+                            f"""
+                            <div class="crossword-pos">
+                                {part_of_speech}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
                         )
 
-                    with col_answer:
+                    st.markdown(
+                        f"""
+                        <div class="clue-result-definition">
+                            {definition}
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
 
-                        st.markdown(
-                            f'<div class="crossword-word">'
-                            f'{word}'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                    with col_definition:
-
-                        st.markdown(
-                            f'<div class="crossword-definition">'
-                            f'{shorten_definition(definition)}'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
+                    st.caption(
+                        f"Match score: {score:.1f}"
+                    )
 
                     st.divider()
 
 
 # ============================================================
-# SIDEBAR
+# FOOTER
 # ============================================================
 
-with st.sidebar:
+st.markdown("---")
 
-    st.header(
-        "⚙️ Solver Information"
-    )
-
-    st.write(
-        f"**Word list:** `{WORD_FILE}`"
-    )
-
-    st.write(
-        f"**Dictionary:** `{DICTIONARY_FILE}`"
-    )
-
-    st.write(
-        f"**Words loaded:** "
-        f"{len(WORDS):,}"
-    )
-
-    st.write(
-        f"**Definitions loaded:** "
-        f"{len(DICTIONARY):,}"
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Pattern Search"
-    )
-
-    st.caption(
-        "Uses words.txt as the authoritative "
-        "crossword word list."
-    )
-
-    st.caption(
-        "Results are ranked using word frequency "
-        "and crossword-oriented signals."
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Clue Solver"
-    )
-
-    st.caption(
-        "Uses dictionary.json only."
-    )
-
-    st.caption(
-        "No OpenAI API calls are made."
-    )
-
-    st.divider()
-
-    st.success(
-        "Local dictionary enabled"
-    )
-
-    st.caption(
-        "Meanings and clue searches work "
-        "without an external dictionary API."
-    )
+st.caption(
+    "Word list: words.txt • "
+    "Meanings: dictionary.json • "
+    "Clue search: dictionary only"
+)
