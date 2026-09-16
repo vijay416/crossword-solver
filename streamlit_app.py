@@ -247,44 +247,29 @@ def letters_only(word):
 
 def pattern_to_regex(pattern):
     """
-    Crossword pattern rules:
-
-      ? = one unknown character
-      _ = one unknown character
-
-      A-Z = fixed letter
-      -   = literal hyphen
-      '   = literal apostrophe
-
-    Example:
-
-      C?? = CAT, CAR, CAN...
-
-      A_RD = AARD
-
-      AARD-V_RK = AARD-VARK
+    Pattern rules:
+    ? or _ = exactly one unknown character
+    *      = zero or more unknown characters
+    A-Z    = fixed letter
+    -      = literal hyphen
+    '      = literal apostrophe
     """
-
-    pattern = pattern.strip().upper()
 
     regex_parts = []
 
-    for ch in pattern:
-
+    for ch in pattern.upper():
         if ch in ["?", "_"]:
             regex_parts.append(".")
-
-        elif ch.isalpha():
+        elif ch == "*":
+            regex_parts.append(".*")
+        elif ch.isalnum():
             regex_parts.append(re.escape(ch))
-
         elif ch in ["-", "'"]:
             regex_parts.append(re.escape(ch))
-
         else:
             regex_parts.append(re.escape(ch))
 
     return "^" + "".join(regex_parts) + "$"
-
 
 # ============================================================
 # WORD FREQUENCY
@@ -460,7 +445,7 @@ def crossword_score(word, dictionary):
 # PATTERN SEARCH
 # ============================================================
 
-def find_pattern_matches(pattern, words, dictionary):
+def find_pattern_matches(pattern, words, dictionary, selected_length="Any"):
 
     regex_string = pattern_to_regex(pattern)
 
@@ -473,23 +458,33 @@ def find_pattern_matches(pattern, words, dictionary):
 
     for word in words:
 
-        if regex.fullmatch(word):
+        if not regex.fullmatch(word):
+            continue
 
-            score = crossword_score(
-                word,
-                dictionary
+        # Optional exact letter-length filter
+        if selected_length != "Any":
+            letter_count = sum(
+                ch.isalpha()
+                for ch in word
             )
 
-            matches.append(
-                (word, score)
-            )
+            if letter_count != selected_length:
+                continue
+
+        score = crossword_score(
+            word,
+            dictionary
+        )
+
+        matches.append(
+            (word, score)
+        )
 
     matches.sort(
         key=lambda x: (-x[1], x[0])
     )
 
     return matches[:MAX_PATTERN_RESULTS]
-
 
 # ============================================================
 # TOKENIZATION
@@ -812,6 +807,17 @@ with tab1:
         key="pattern_input"
     )
 
+    length_options = ["Any"] + list(range(3, 10))
+
+    length_options = ["Any"] + list(range(3, 10))
+
+    selected_length = st.selectbox(
+        "Exact word length",
+        options=length_options,
+        index=0,
+        help="Choose Any for all lengths, or select 3–9 for an exact letter count."
+    )
+
     search_clicked = st.button(
         "🔍 Search",
         type="primary",
@@ -834,10 +840,11 @@ with tab1:
             with st.spinner("Searching word list..."):
 
                 results = find_pattern_matches(
-                    pattern,
-                    words,
-                    dictionary
-                )
+                pattern,
+                words,
+                dictionary,
+                selected_length
+            )
 
             st.session_state.pattern_results = results
             st.session_state.last_pattern = pattern.upper()
