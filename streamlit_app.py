@@ -240,6 +240,21 @@ def letters_only(word):
 
     return re.sub(r"[^a-z]", "", word.lower())
 
+# ====================================================
+# MEANINGS -> SHOW 3 LINES
+# ====================================================
+
+def meaning_preview(text, max_lines=3, max_chars=300):
+    if not text:
+        return ""
+
+    text = str(text).strip()
+
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars].rsplit(" ", 1)[0] + "..."
+
 
 # ============================================================
 # PATTERN -> REGEX
@@ -965,7 +980,7 @@ with tab1:
 
                             st.markdown(
                                 f"<div class='crossword-definition'>"
-                                f"{definition}"
+                                f"{meaning_preview(definition)}"
                                 f"</div>",
                                 unsafe_allow_html=True
                             )
