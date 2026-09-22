@@ -593,6 +593,17 @@ def search_dictionary_for_clue(
     candidate_words &= word_set
 
     # --------------------------------------------------------
+    # Apply exact word length if selected
+    # --------------------------------------------------------
+
+    if selected_length != "Any":
+
+        candidate_words = {
+            w for w in candidate_words
+            if sum(ch.isalpha() for ch in w) == selected_length
+        }
+
+    # --------------------------------------------------------
     # Apply pattern if supplied
     # --------------------------------------------------------
 
@@ -998,11 +1009,22 @@ with tab2:
         key="clue_input"
     )
 
+    clue_length_options = ["Any"] + list(range(3, 10))
+
+    clue_selected_length = st.selectbox(
+        "Number of letters",
+        options=clue_length_options,
+        index=0,
+        key="clue_word_length",
+        help="Choose Any for all lengths, or select 3–9 for an exact word length."
+    )
+    
     clue_pattern = st.text_input(
         "Optional pattern",
         placeholder="Example: C??",
         key="clue_pattern_input"
     )
+    
 
     clue_search_clicked = st.button(
         "📖 Search Dictionary",
@@ -1030,9 +1052,18 @@ with tab2:
                         clue_pattern,
                         words,
                         dictionary,
-                        dictionary_index
+                        dictionary_index.
+                        clue_selected_length
                     )
                 )
+                            
+
+            if clue_selected_length != "Any":
+                clue_results = [
+                    result
+                    for result in clue_results
+                    if sum(ch.isalpha() for ch in result[0]) == clue_selected_length
+                ]
 
             if not clue_results:
 
