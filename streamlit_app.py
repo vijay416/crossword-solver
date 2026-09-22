@@ -1053,7 +1053,7 @@ with tab2:
                         clue_pattern,
                         words,
                         dictionary,
-                        dictionary_index.
+                        dictionary_index,
                         clue_selected_length
                     )
                 )
