@@ -559,7 +559,8 @@ def search_dictionary_for_clue(
     pattern,
     words,
     dictionary,
-    dictionary_index
+    dictionary_index,
+    selected_length="Any"
 ):
 
     clue_tokens = tokenize(clue)
