@@ -970,19 +970,20 @@ with tab1:
                             )
                 
                         if definition:
-                            st.markdown(
+
+                                st.markdown(
                                     f"<div class='crossword-definition'>"
                                     f"{definition}"
                                     f"</div>",
                                     unsafe_allow_html=True
                                 )                         
                                 
-                
-                            if st.button(
-                                   "Hide",
-                                   key=f"hide_meaning_{rank}_{word}"
-                               ):
-                                  st.session_state.selected_meaning_word = None
+                    
+                                if st.button(
+                                       "Hide",
+                                       key=f"hide_meaning_{rank}_{word}"
+                                       st.session_state.selected_meaning_word = None
+                                   ): 
                                                       
                                 
                         else:
