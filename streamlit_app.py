@@ -977,7 +977,7 @@ with tab1:
                                     False
                                 )
 
-                            if not hidden:
+                            
                                 st.markdown(
                                     f"<div class='crossword-definition'>"
                                     f"{definition}"
@@ -993,10 +993,7 @@ with tab1:
                                  st.session_state.selected_meaning_word = None                  
                                  st.session_state[hidden_key] = True
                         
-                            else:
-                            st.caption(
-                                "Definition not available."
-                            )
+                            
                 
                         else:
                 
