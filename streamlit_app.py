@@ -939,99 +939,87 @@ with tab1:
                     )
 
                 # ------------------------------------------------
-        # Meaning shown beside the selected word
-        # ------------------------------------------------
-        
-        if (
-            st.session_state.selected_meaning_word
-            == word
-        ):
-        
-            dictionary_key = normalized_word(word)
-        
-            info = dictionary.get(dictionary_key)
-        
-            if info:
-        
-                definition = info.get(
-                    "definition",
-                    ""
+# Meaning shown beside the selected word
+# ------------------------------------------------
+
+if st.session_state.selected_meaning_word == word:
+
+    dictionary_key = normalized_word(word)
+
+    info = dictionary.get(dictionary_key)
+
+    if info:
+
+        definition = info.get(
+            "definition",
+            ""
+        )
+
+        part_of_speech = info.get(
+            "part_of_speech",
+            ""
+        )
+
+        if part_of_speech:
+
+            st.markdown(
+                f"<div class='crossword-pos'>"
+                f"{part_of_speech}"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+        if definition:
+
+            meaning_key = f"meaning_expanded_{word}"
+
+            # Default = collapsed
+            expanded = st.session_state.get(
+                meaning_key,
+                False
+            )
+
+            if expanded:
+
+                st.markdown(
+                    f"<div class='crossword-definition'>"
+                    f"{definition}"
+                    f"</div>",
+                    unsafe_allow_html=True
                 )
-        
-                part_of_speech = info.get(
-                    "part_of_speech",
-                    ""
-                )
-        
-                if part_of_speech:
-        
-                    st.markdown(
-                        f"<div class='crossword-pos'>"
-                        f"{part_of_speech}"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
-        
-                if definition:
-        
-                    # --------------------------------------------
-                    # More / Hide state for this word
-                    # --------------------------------------------
-        
-                    meaning_key = f"meaning_expanded_{word}"
-        
-                    if meaning_key not in st.session_state:
-                        st.session_state[meaning_key] = False
-        
-                    # --------------------------------------------
-                    # Display meaning
-                    # --------------------------------------------
-        
-                    if st.session_state[meaning_key]:
-        
-                        st.markdown(
-                            f"<div class='crossword-definition'>"
-                            f"{definition}"
-                            f"</div>",
-                            unsafe_allow_html=True
-                        )
-        
-                        if st.button(
-                            "Hide",
-                            key=f"hide_meaning_{rank}_{word}"
-                        ):
-        
-                            st.session_state[meaning_key] = False
-                            st.rerun()
-        
-                    else:
-        
-                        st.markdown(
-                            f"<div class='crossword-definition'>"
-                            f"{meaning_preview(definition)}"
-                            f"</div>",
-                            unsafe_allow_html=True
-                        )
-        
-                        if st.button(
-                            "More",
-                            key=f"more_meaning_{rank}_{word}"
-                        ):
-        
-                            st.session_state[meaning_key] = True
-                            st.rerun()
-        
-                else:
-        
-                    st.caption(
-                        "Definition not available."
-                    )
-        
+
+                if st.button(
+                    "Hide",
+                    key=f"hide_meaning_{rank}_{word}"
+                ):
+                    st.session_state[meaning_key] = False
+
             else:
-        
-                st.caption(
-                    "Meaning not found in local dictionary."
+
+                st.markdown(
+                    f"<div class='crossword-definition'>"
+                    f"{meaning_preview(definition)}"
+                    f"</div>",
+                    unsafe_allow_html=True
                 )
+
+                if st.button(
+                    "More",
+                    key=f"more_meaning_{rank}_{word}"
+                ):
+                    st.session_state[meaning_key] = True
+
+        else:
+
+            st.caption(
+                "Definition not available."
+            )
+
+    else:
+
+        st.caption(
+            "Meaning not found in local dictionary."
+        )
 
     elif st.session_state.last_pattern:
 
