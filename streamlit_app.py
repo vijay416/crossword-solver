@@ -993,6 +993,7 @@ with tab1:
                                     key=f"hide_meaning_{rank}_{word}"
                                 ):
                                     st.session_state[meaning_key] = False
+                                    st.session_state.selected_meaning_word = None
                 
                             else:
                 
