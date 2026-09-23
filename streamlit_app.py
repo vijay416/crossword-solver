@@ -976,7 +976,7 @@ with tab1:
                             # Default = collapsed
                             expanded = st.session_state.get(
                                 meaning_key,
-                                True
+                                False
                             )
                 
                             if expanded:
