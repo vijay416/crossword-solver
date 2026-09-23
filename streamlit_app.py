@@ -981,7 +981,7 @@ with tab1:
                     
                                 if st.button(
                                        "Hide",
-                                       key=f"hide_meaning_{rank}_{word}"
+                                       key=f"hide_meaning_{rank}_{word}",
                                        st.session_state.selected_meaning_word = None
                                    ): 
                                                       
