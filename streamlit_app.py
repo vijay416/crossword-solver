@@ -970,45 +970,20 @@ with tab1:
                             )
                 
                         if definition:
-                
-                            meaning_key = f"meaning_expanded_{word}"
-                
-                            # Default = collapsed
-                            expanded = st.session_state.get(
-                                meaning_key,
-                                False
-                            )
-                
-                            if expanded:
-                                st.write("inside expanded")
-                                st.markdown(
+                            st.markdown(
                                     f"<div class='crossword-definition'>"
                                     f"{definition}"
                                     f"</div>",
                                     unsafe_allow_html=True
-                                )
-                
-                                if st.button(
-                                    "Hide",
-                                    key=f"hide_meaning_{rank}_{word}"
-                                ):
-                                    st.session_state[meaning_key] = False
-                                    st.session_state.selected_meaning_word = None
+                                )                         
                                 
-                            else:
                 
-                                st.markdown(
-                                    f"<div class='crossword-definition'>"
-                                    f"{meaning_preview(definition)}"
-                                    f"</div>",
-                                    unsafe_allow_html=True
-                                )
-                
-                                if st.button(
-                                    "More",
-                                    key=f"more_meaning_{rank}_{word}"
-                                ):
-                                    st.session_state[meaning_key] = True
+                            if st.button(
+                                   "Hide",
+                                   key=f"hide_meaning_{rank}_{word}"
+                               ):
+                                  st.session_state.selected_meaning_word = None
+                                                      
                                 
                         else:
                 
