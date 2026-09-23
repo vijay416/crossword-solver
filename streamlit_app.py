@@ -928,7 +928,7 @@ with tab1:
                 # ------------------------------------------------
                 # Meaning button
                 # ------------------------------------------------
-                st.write("before meaning button")
+                
                 if st.button(
                     "Meaning",
                     key=f"meaning_{rank}_{word}"
@@ -937,7 +937,7 @@ with tab1:
                     st.session_state.selected_meaning_word = (
                         word
                     )
-                st.write("after meaning button clicked")
+                
                 # ------------------------------------------------
                 # Meaning shown beside the selected word
                 # ------------------------------------------------
@@ -994,7 +994,7 @@ with tab1:
                                 ):
                                     st.session_state[meaning_key] = False
                                     st.session_state.selected_meaning_word = None
-                                st.write("inside hide")
+                                
                             else:
                 
                                 st.markdown(
@@ -1009,7 +1009,7 @@ with tab1:
                                     key=f"more_meaning_{rank}_{word}"
                                 ):
                                     st.session_state[meaning_key] = True
-                                st.write("inside more")
+                                
                         else:
                 
                             st.caption(
