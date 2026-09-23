@@ -971,6 +971,13 @@ with tab1:
                 
                         if definition:
 
+                                hidden_key = f"hide_meaning_{rank}_{word}"        
+                                hidden = st.session_state.get(
+                                    hidden_key,
+                                    False
+                                )
+
+                            if not hidden:
                                 st.markdown(
                                     f"<div class='crossword-definition'>"
                                     f"{definition}"
@@ -984,7 +991,7 @@ with tab1:
                                        key=f"hide_meaning_{rank}_{word}",                                       
                                    ): 
                                  st.session_state.selected_meaning_word = None                  
-                                
+                                 st.session_state[hidden_key] = True
                         else:
                 
                             st.caption(
