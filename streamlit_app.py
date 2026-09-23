@@ -977,7 +977,7 @@ with tab1:
                                     False
                                 )
 
-                            if not hidden:
+                            if not hidden
                                 st.markdown(
                                     f"<div class='crossword-definition'>"
                                     f"{definition}"
