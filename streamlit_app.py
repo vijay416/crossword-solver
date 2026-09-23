@@ -835,9 +835,7 @@ with tab1:
     )
 
     length_options = ["Any"] + list(range(3, 10))
-
-    length_options = ["Any"] + list(range(3, 10))
-
+    
     selected_length = st.selectbox(
         "Exact word length",
         options=length_options,
