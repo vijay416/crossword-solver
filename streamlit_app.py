@@ -3,6 +3,8 @@ import json
 import re
 from collections import Counter
 import streamlit as st
+import nltk
+from nltk.corpus import wordnet as wn
 
 # Wordfreq is optional but recommended
 try:
