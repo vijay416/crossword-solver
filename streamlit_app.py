@@ -312,20 +312,23 @@ def search_dictionary_for_clue(
     if not clue_tokens:
         return []
 
-    # Identify any strict modifier constraints in the clue
-    clue_token_set = set(clue_tokens)
-    opposing_words = set()
-    for token in clue_tokens:
-        if token in ANTONYM_PAIRS:
-            opposing_words.update(ANTONYM_PAIRS[token])
+    # Calculate total available IDF weight in the clue
+    total_clue_idf = sum(idf_scores.get(t, 1.0) for t in clue_tokens)
 
-    # 1. Gather candidates matching ANY clue token
+    # Find high-value ("rare/descriptive") words in clue
+    # Words with IDF >= 5.0 are key descriptors (e.g., 'feline')
+    rare_clue_tokens = [t for t in clue_tokens if idf_scores.get(t, 0) >= 5.0]
+
+    # 1. Gather candidates matching clue tokens
     candidate_words = set()
-    for token in clue_tokens:
+    
+    # Prioritize matching rare tokens first
+    search_tokens = rare_clue_tokens if rare_clue_tokens else clue_tokens
+    for token in search_tokens:
         if token in dictionary_index:
             candidate_words.update(dictionary_index[token])
 
-    # 2. Restrict candidates to valid crossword words
+    # 2. Restrict to valid crossword words
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
@@ -344,6 +347,12 @@ def search_dictionary_for_clue(
         except re.error:
             return []
 
+    # Antonym check prep
+    opposing_words = set()
+    for token in clue_tokens:
+        if token in ANTONYM_PAIRS:
+            opposing_words.update(ANTONYM_PAIRS[token])
+
     clue_lower = clue.lower().strip()
     results = []
 
@@ -360,44 +369,50 @@ def search_dictionary_for_clue(
         if def_length == 0:
             continue
 
-        # --- Base TF-IDF Match Score ---
-        overlap_score = 0.0
         unique_def_tokens = set(definition_tokens)
-        matched_clue_tokens = 0
+
+        # MANDATORY CHECK: If clue has key descriptive words (like 'feline'),
+        # candidate MUST contain at least one of them
+        if rare_clue_tokens and not any(rt in unique_def_tokens for rt in rare_clue_tokens):
+            continue
+
+        # --- Weighted Match Calculation ---
+        matched_idf = 0.0
+        matched_count = 0
 
         for token in clue_tokens:
             if token in unique_def_tokens:
-                # Add token's IDF weight
-                overlap_score += idf_scores.get(token, 1.0) * 10.0
-                matched_clue_tokens += 1
+                matched_idf += idf_scores.get(token, 1.0)
+                matched_count += 1
 
-        # Clue Coverage Penalty: Require coverage of at least 60% of clue tokens
-        clue_coverage_ratio = matched_clue_tokens / len(clue_tokens)
-        if len(clue_tokens) >= 2 and clue_coverage_ratio < 0.6:
-            overlap_score *= 0.2
+        # Calculate percentage of clue's total importance matched
+        idf_coverage_ratio = matched_idf / total_clue_idf if total_clue_idf > 0 else 0
 
-        # --- Length Normalization ---
-        # Keeps concise definitions (e.g. 5-15 words) at the top over multi-paragraph entries
-        length_penalty = math.log(def_length + 5)
-        final_score = (overlap_score / length_penalty) * clue_coverage_ratio
+        # Reject candidates matching less than 40% of total clue importance
+        if idf_coverage_ratio < 0.40:
+            continue
 
-        # --- Contradiction / Antonym Penalty ---
-        # If clue has 'small' and definition contains 'large'/'huge', slash score by 80%
+        # Score calculation based on weighted IDF match
+        base_score = matched_idf * 15.0
+
+        # Length Normalization (milder penalty curve)
+        length_factor = 1.0 / (1.0 + math.log10(max(def_length, 1)))
+        final_score = base_score * length_factor * idf_coverage_ratio
+
+        # --- Contradiction Penalty ---
         if opposing_words and any(opp in unique_def_tokens for opp in opposing_words):
-            final_score *= 0.2
+            final_score *= 0.15
 
-        # --- Direct Match & Clue Proximity Boost ---
-        # Check if matched tokens appear near the start of the definition
-        first_10_tokens = set(definition_tokens[:10])
-        early_matches = sum(1 for t in clue_tokens if t in first_10_tokens)
-        if early_matches >= 2:
-            final_score += 25.0
+        # --- Proximity Boost ---
+        first_10 = set(definition_tokens[:10])
+        if sum(1 for t in clue_tokens if t in first_10) >= 2:
+            final_score += 20.0
 
-        # Substring / Exact match bonus
+        # --- Substring / Exact match bonus ---
         if clue_lower in definition_lower:
-            final_score += 50.0
+            final_score += 40.0
 
-        # Common crossword answer frequency boost
+        # --- Answer Frequency Boost ---
         final_score += frequency_score(candidate) * 0.5
 
         if final_score > 0:
@@ -410,7 +425,6 @@ def search_dictionary_for_clue(
 
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
-
 
 # ============================================================
 # INITIALIZE DATA
