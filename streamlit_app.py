@@ -463,29 +463,35 @@ def search_dictionary_for_clue(
             if total_concepts >= 2 and coverage < 0.50:
                 continue
 
-            # Scoring
-            matched_idf = sum(
-                idf_scores.get(t, 2.0) for t in clue_tokens if t in sense_token_set
-            )
-            sense_score = matched_idf * 25.0 * (coverage ** 2)
+            # SCORING LOOP
+            # 1. Deduplicate clue tokens so IDF is counted AT MOST ONCE per token
+            matched_tokens = set(clue_tokens) & sense_token_set
+            matched_idf = sum(idf_scores.get(t, 2.0) for t in matched_tokens)
 
+            # 2. Lower base multiplier (10.0 instead of 25.0) to keep scores in a 0-100 range
+            sense_score = matched_idf * 10.0 * (coverage ** 2)
+
+            # 3. Apply logarithmic length penalty
             sense_length = len(sense_tokens)
             sense_score *= (1.0 / (1.0 + 0.15 * math.log(max(sense_length, 1))))
 
+            # 4. Moderate the exact substring bonus (reduced from +35.0 to +8.0)
             if clue_lower in sense.lower():
-                sense_score += 35.0
+                sense_score += 8.0
 
+            # Track the highest scoring sense for this word
             if sense_score > best_sense_score:
                 best_sense_score = sense_score
-                best_sense_def = sense
+                best_sense_def = sense  # Save the matched sense!
 
         if best_sense_score > 0:
-            best_sense_score += frequency_score(candidate) * 2.0
+            # 5. Add a mild common-word frequency bonus
+            best_sense_score += frequency_score(candidate) * 0.5
 
             results.append((
                 candidate.upper(),
-                best_sense_score,
-                full_definition,
+                round(best_sense_score, 1),
+                best_sense_def,  # <--- Return ONLY the matched sense, NOT full_definition
                 info.get("part_of_speech", "")
             ))
 
