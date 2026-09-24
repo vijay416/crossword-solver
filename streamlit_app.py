@@ -458,36 +458,50 @@ with tab2:
     st.subheader("Dictionary Clue Solver")
     st.caption("Searches local dictionary only.")
 
-    clue = st.text_input("Enter clue", placeholder="Example: Small domesticated feline", key="clue_input")
-    clue_selected_length = st.selectbox(
-        "Number of letters",
-        options=["Any"] + list(range(3, 10)),
-        index=0,
-        key="clue_word_length"
-    )
-    clue_pattern = st.text_input("Optional pattern", placeholder="Example: C??", key="clue_pattern_input")
+    # Wrap inputs inside an st.form to stop dropdowns from triggering reruns
+    with st.form("dictionary_clue_form"):
+        clue = st.text_input("Enter clue", placeholder="Example: Small domesticated feline", key="clue_input")
+        clue_selected_length = st.selectbox(
+            "Number of letters",
+            options=["Any"] + list(range(3, 10)),
+            index=0,
+            key="clue_word_length"
+        )
+        clue_pattern = st.text_input("Optional pattern", placeholder="Example: C??", key="clue_pattern_input")
 
-    if st.button("📖 Search Dictionary", type="primary", key="clue_search_button"):
+        # Form submit button
+        clue_search_clicked = st.form_submit_button("📖 Search Dictionary", type="primary")
+
+    # 1. Update session state ONLY when form is submitted
+    if clue_search_clicked:
         if not clue.strip():
             st.warning("Please enter a clue.")
+            st.session_state.clue_results = []
+            st.session_state.last_clue = ""
         else:
             with st.spinner("Searching local dictionary..."):
-                clue_results = search_dictionary_for_clue(
+                st.session_state.clue_results = search_dictionary_for_clue(
                     clue, clue_pattern, words_data, dictionary, dictionary_index, clue_selected_length
                 )
+                st.session_state.last_clue = clue.strip()
 
-            if not clue_results:
-                st.info("No strong dictionary matches found.")
-            else:
-                st.markdown(f"**Top {len(clue_results)} dictionary matches**")
-                for rank, (word, score, definition, part_of_speech) in enumerate(clue_results, start=1):
-                    st.markdown(f"<div class='clue-result-word'>#{rank} &nbsp; {word}</div>", unsafe_allow_html=True)
-                    if part_of_speech:
-                        st.markdown(f"<div class='crossword-pos'>{part_of_speech}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div class='clue-result-definition'>{highlight_clue_matches(definition,clue)}</div>", unsafe_allow_html=True)
-                    st.caption(f"Match score: {score:.1f}")
-                    st.divider()
+    # 2. Retrieve results from session state (persists across reruns)
+    clue_results = st.session_state.get("clue_results", [])
+    last_clue = st.session_state.get("last_clue", "")
 
+    # 3. Render results outside if clue_search_clicked
+    if clue_results:
+        st.markdown(f"**Top {len(clue_results)} dictionary matches**")
+        for rank, (word, score, definition, part_of_speech) in enumerate(clue_results, start=1):
+            st.markdown(f"<div class='clue-result-word'>#{rank} &nbsp; {word}</div>", unsafe_allow_html=True)
+            if part_of_speech:
+                st.markdown(f"<div class='crossword-pos'>{part_of_speech}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='clue-result-definition'>{highlight_clue_matches(definition, last_clue)}</div>", unsafe_allow_html=True)
+            st.caption(f"Match score: {score:.1f}")
+            st.divider()
+
+    elif last_clue:
+        st.info("No strong dictionary matches found.")
 
 # ============================================================
 # FOOTER
