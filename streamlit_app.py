@@ -4,6 +4,18 @@ import re
 from collections import Counter
 import streamlit as st
 import nltk
+
+# Auto-download WordNet datasets on Streamlit Cloud
+try:
+    nltk.data.find('corpora/wordnet.zip')
+except LookupError:
+    nltk.download('wordnet', quiet=True)
+
+try:
+    nltk.data.find('corpora/omw-1.4.zip')
+except LookupError:
+    nltk.download('omw-1.4', quiet=True)
+
 from nltk.corpus import wordnet as wn
 
 # Wordfreq is optional but recommended
