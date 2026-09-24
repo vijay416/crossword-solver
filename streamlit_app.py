@@ -317,8 +317,8 @@ def split_into_senses(definition_text):
     """Splits multi-sense dictionary strings into individual definition senses."""
     # Split by numbered definitions like "1.", "2.", or "3."
     senses = re.split(r'\s*\d+\.\s*', definition_text)
-    return [s.strip() for s' in senses if s.strip()]
-
+    return [s.strip() for s in senses if s.strip()]
+    
 
 def search_dictionary_for_clue(
     clue, pattern, words_data, dictionary, index_tuple, selected_length="Any"
