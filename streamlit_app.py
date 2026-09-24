@@ -304,12 +304,13 @@ ANTONYM_PAIRS = {
     "cold": {"hot", "warm", "boiling"},
 }
 
-# Manual domain mapping for high-frequency crossword categories
-CROSSWORD_SYNONYMS = {
-    "feline": {"cat", "cats", "feline", "felid", "kitten", "catlike"},
+# Mapping clue concepts to synonym families for semantic coverage matching
+CONCEPT_GROUPS = {
+    "feline": {"cat", "cats", "feline", "felid", "kitten", "kittens", "catlike"},
     "canine": {"dog", "dogs", "canine", "hound", "puppy", "doglike"},
-    "small": {"small", "little", "tiny", "miniature", "short", "young"},
+    "small": {"small", "little", "tiny", "miniature", "short", "young", "puny"},
     "large": {"large", "big", "huge", "giant", "great"},
+    "animal": {"animal", "beast", "creature", "quadruped", "carnivore", "mammal"},
 }
 
 
@@ -321,35 +322,38 @@ def search_dictionary_for_clue(
     if not clue_tokens:
         return []
 
-    # 1. Expand clue tokens using semantic lookup
-    expanded_clue_tokens = set(clue_tokens)
-    for token in clue_tokens:
-        if token in CROSSWORD_SYNONYMS:
-            expanded_clue_tokens.update(CROSSWORD_SYNONYMS[token])
+    # 1. Group clue tokens into distinct conceptual requirements
+    clue_concepts = []
+    expanded_search_tokens = set(clue_tokens)
 
-    # 2. Collect candidate words matching ANY expanded token
+    for token in clue_tokens:
+        if token in CONCEPT_GROUPS:
+            group = CONCEPT_GROUPS[token]
+            clue_concepts.append(group)
+            expanded_search_tokens.update(group)
+        else:
+            clue_concepts.append({token})
+
+    # 2. Gather candidates matching search tokens
     candidate_words = set()
-    for token in expanded_clue_tokens:
+    for token in expanded_search_tokens:
         if token in dictionary_index:
             candidate_words.update(dictionary_index[token])
-
-    # Also add words whose actual dictionary ENTRY is one of our synonym targets
-    for token in expanded_clue_tokens:
         if token in dictionary:
             candidate_words.add(token)
 
-    # 3. Filter candidates to valid crossword words
+    # 3. Filter to valid crossword words
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
     # 4. Filter by word length
     if selected_length != "Any":
         candidate_words = {
-            w for w in candidate_words 
+            w for w in candidate_words
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # 5. Filter by pattern match
+    # 5. Filter by regex pattern
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -357,7 +361,7 @@ def search_dictionary_for_clue(
         except re.error:
             return []
 
-    # Prepare opposing words for hard filtering
+    # Antonym tracking
     opposing_words = set()
     for token in clue_tokens:
         if token in ANTONYM_PAIRS:
@@ -377,51 +381,58 @@ def search_dictionary_for_clue(
         if def_length == 0:
             continue
 
-        unique_def_tokens = set(definition_tokens)
+        # Combine entry word + definition tokens to check full semantic content
+        full_text_tokens = set(definition_tokens) | {candidate}
 
-        # HARD ANTONYM FILTER: Immediately discard direct contradictions (e.g., 'large' for 'small')
-        if opposing_words and any(opp in unique_def_tokens for opp in opposing_words):
+        # HARD ANTONYM FILTER
+        if opposing_words and any(opp in full_text_tokens for opp in opposing_words):
             continue
 
-        # Match calculation against expanded token set
-        matched_tokens = [t for t in clue_tokens if t in unique_def_tokens or candidate in expanded_clue_tokens]
-        matched_count = len(matched_tokens)
-        
-        # Count overlapping terms from expanded set
-        semantic_matches = sum(1 for t in expanded_clue_tokens if t in unique_def_tokens or t == candidate)
+        # --- CONCEPT COVERAGE CHECK ---
+        # Count how many DISTINCT concepts in the clue are matched
+        matched_concepts_count = 0
+        for concept_set in clue_concepts:
+            if any(term in full_text_tokens for term in concept_set):
+                matched_concepts_count += 1
 
-        if semantic_matches == 0:
+        total_concepts = len(clue_concepts)
+        concept_coverage = matched_concepts_count / total_concepts
+
+        # DISCARD candidates that don't match at least 66% of the clue's concepts
+        if total_concepts >= 2 and concept_coverage < 0.66:
             continue
 
         # --- SCORING ---
-        base_score = sum(idf_scores.get(t, 2.0) for t in matched_tokens) * 15.0
-        base_score += semantic_matches * 10.0
+        # Base IDF score for matched words in definition
+        matched_idf = sum(
+            idf_scores.get(t, 1.5) for t in clue_tokens if t in full_text_tokens
+        )
+        score = matched_idf * 20.0
 
-        # Gentle length penalty
-        length_factor = 1.0 / (1.0 + 0.10 * math.log(max(def_length, 1)))
-        score = base_score * length_factor
+        # Multiply heavily by concept coverage squared
+        score *= (concept_coverage ** 3)
 
-        # Boost if candidate word itself is a direct synonym target (e.g. candidate='cat')
-        if candidate in expanded_clue_tokens:
-            score += 40.0
+        # Length normalization penalty
+        length_factor = 1.0 / (1.0 + 0.12 * math.log(max(def_length, 1)))
+        score *= length_factor
 
-        # Proximity boost
+        # Proximity boost (first 10 tokens)
         first_10 = set(definition_tokens[:10])
         if sum(1 for t in clue_tokens if t in first_10) >= 1:
             score += 15.0
 
-        # Exact phrase bonus
+        # Exact clue phrase bonus
         if clue_lower in definition.lower():
             score += 35.0
 
-        # Noun preference
+        # Noun preference (crossword answers are overwhelmingly nouns)
         pos = info.get("part_of_speech", "").lower()
         if "noun" in pos or "n." in pos:
-            score += 8.0
+            score += 10.0
         elif "adj" in pos:
-            score -= 5.0
+            score -= 10.0  # Penalize adjectives like TINY, CATLIKE, MINIATURE
 
-        # Frequency bonus
+        # Answer frequency boost
         score += frequency_score(candidate) * 0.5
 
         if score > 0:
