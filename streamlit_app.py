@@ -304,31 +304,24 @@ ANTONYM_PAIRS = {
     "cold": {"hot", "warm", "boiling"},
 }
 
-# Mapping clue concepts to synonym families for semantic coverage matching
-CONCEPT_GROUPS = {
-    "feline": {"cat", "cats", "feline", "felid", "kitten", "kittens", "catlike"},
-    "canine": {"dog", "dogs", "canine", "hound", "puppy", "doglike"},
-    "small": {"small", "little", "tiny", "miniature", "short", "young", "puny"},
-    "large": {"large", "big", "huge", "giant", "great"},
-    "animal": {"animal", "beast", "creature", "quadruped", "carnivore", "mammal"},
-}
+COMPARISON_REGEX = re.compile(
+    r'\b(size of a|resembling a|resembling the|like a|similar to|called also|allied to|type of)\b',
+    re.IGNORECASE
+)
 
-def split_into_senses(definition_text):
-    """
-    Splits dictionary definitions into individual semantic senses by:
-    - Numbers (1., 2., 3.)
-    - Lettered sub-senses ((a), (b), (c))
-    - Structural dividers (-- or [Obs.])
-    """
-    if not definition_text:
-        return []
-    
-    # Regex splits on '1.', '2.', '(a)', '(b)', '3. Fig.:', '--', etc.
-    senses = re.split(
-        r'(?:\s*\d+\.\s*|\s*\([a-z]\)\s*|\s*--\s*|\s*\[Obs\.\]\s*)', 
-        definition_text
-    )
-    return [s.strip() for s in senses if len(s.strip()) > 3]    
+def get_dynamic_synonyms(word):
+    """Dynamically fetches synonyms and lemmas using WordNet for ANY word."""
+    synonyms = {word}
+    for syn in wn.synsets(word):
+        for lemma in syn.lemmas():
+            synonyms.add(lemma.name().lower().replace('_', ' '))
+    return synonyms
+
+def get_most_important_token(clue_tokens, idf_scores):
+    """Dynamically finds the most descriptive/rare token in any clue based on IDF."""
+    if not clue_tokens:
+        return None
+    return max(clue_tokens, key=lambda t: idf_scores.get(t, 1.0))
 
 def search_dictionary_for_clue(
     clue, pattern, words_data, dictionary, index_tuple, selected_length="Any"
@@ -338,19 +331,20 @@ def search_dictionary_for_clue(
     if not clue_tokens:
         return []
 
-    # Map clue tokens to conceptual groups
+    # 1. Dynamically identify the anchor (rarest) token in the clue
+    anchor_token = get_most_important_token(clue_tokens, idf_scores)
+
+    # 2. Build dynamic concept groups for ALL clue tokens using WordNet
     clue_concepts = []
     expanded_search_tokens = set(clue_tokens)
 
     for token in clue_tokens:
-        if token in CONCEPT_GROUPS:
-            group = CONCEPT_GROUPS[token]
-            clue_concepts.append((token, group))
-            expanded_search_tokens.update(group)
-        else:
-            clue_concepts.append((token, {token}))
+        # Get dynamic synonyms instead of static hardcoded dicts
+        syn_group = get_dynamic_synonyms(token) if idf_scores.get(token, 0) > 3.0 else {token}
+        clue_concepts.append((token, syn_group))
+        expanded_search_tokens.update(syn_group)
 
-    # Candidate collection
+    # 3. Fetch candidates matching any expanded search token
     candidate_words = set()
     for token in expanded_search_tokens:
         if token in dictionary_index:
@@ -358,7 +352,6 @@ def search_dictionary_for_clue(
         if token in dictionary:
             candidate_words.add(token)
 
-    # Valid crossword set filter
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
@@ -369,7 +362,7 @@ def search_dictionary_for_clue(
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # Filter by pattern match
+    # Filter by regex pattern
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -391,9 +384,7 @@ def search_dictionary_for_clue(
         if not full_definition:
             continue
 
-        # Split long definitions into granular senses
         senses = split_into_senses(full_definition)
-        
         best_sense_score = -1.0
         best_sense_def = ""
 
@@ -404,50 +395,44 @@ def search_dictionary_for_clue(
 
             sense_token_set = set(sense_tokens) | {candidate}
 
-            # Hard Antonym Exclusion per sense (e.g. 'large' for 'small')
+            # Antonym Exclusion
             if opposing_words and any(opp in sense_token_set for opp in opposing_words):
                 continue
 
-            # Check concept coverage inside THIS SINGLE SENSE
+            # Concept Coverage
             matched_concept_count = 0
-            has_mandatory_feline = False
+            has_anchor_match = False
 
             for original_token, group in clue_concepts:
-                if any(term in sense_token_set for term in group):
-                    matched_concept_count += 1
-                    # Strict check: 'feline' requirement must be satisfied by core feline words
-                    if original_token == "feline" and any(
-                        term in sense_token_set for term in {"feline", "felid", "cat", "felis"}
-                    ):
-                        has_mandatory_feline = True
+                group_matches = [
+                    term for term in group 
+                    if term in sense_token_set and is_valid_direct_match(sense, term)
+                ]
 
-            # RULE 1: Direct requirement for 'feline'
-            if "feline" in clue_tokens and not has_mandatory_feline:
+                if group_matches:
+                    matched_concept_count += 1
+                    # Enforce anchor token match dynamically
+                    if original_token == anchor_token:
+                        has_anchor_match = True
+
+            # Dynamic Rule: The rarest concept in the clue MUST be satisfied
+            if anchor_token and idf_scores.get(anchor_token, 0) > 4.0 and not has_anchor_match:
                 continue
 
-            # RULE 2: Must match at least 66% of clue concepts in ONE sense
             total_concepts = len(clue_concepts)
             coverage = matched_concept_count / total_concepts
-            if total_concepts >= 2 and coverage < 0.66:
+            if total_concepts >= 2 and coverage < 0.50:
                 continue
 
-            # Base IDF score calculated ONLY on this isolated sense
+            # Scoring
             matched_idf = sum(
                 idf_scores.get(t, 2.0) for t in clue_tokens if t in sense_token_set
             )
-            
-            sense_score = matched_idf * 25.0 * (coverage ** 3)
+            sense_score = matched_idf * 25.0 * (coverage ** 2)
 
-            # Strict sense length normalization
             sense_length = len(sense_tokens)
             sense_score *= (1.0 / (1.0 + 0.15 * math.log(max(sense_length, 1))))
 
-            # Proximity boost
-            first_8 = set(sense_tokens[:8])
-            if sum(1 for t in clue_tokens if t in first_8) >= 1:
-                sense_score += 15.0
-
-            # Direct definition phrase bonus
             if clue_lower in sense.lower():
                 sense_score += 35.0
 
@@ -456,14 +441,6 @@ def search_dictionary_for_clue(
                 best_sense_def = sense
 
         if best_sense_score > 0:
-            # Metadata adjustments (Part of Speech & Word Popularity)
-            pos = info.get("part_of_speech", "").lower()
-            if "noun" in pos or "n." in pos:
-                best_sense_score += 10.0
-            elif "adj" in pos:
-                best_sense_score -= 10.0
-
-            # Boost common crossword words (e.g. CAT, KITTEN)
             best_sense_score += frequency_score(candidate) * 2.0
 
             results.append((
