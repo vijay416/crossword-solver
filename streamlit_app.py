@@ -304,6 +304,15 @@ ANTONYM_PAIRS = {
     "cold": {"hot", "warm", "boiling"},
 }
 
+# Manual domain mapping for high-frequency crossword categories
+CROSSWORD_SYNONYMS = {
+    "feline": {"cat", "cats", "feline", "felid", "kitten", "catlike"},
+    "canine": {"dog", "dogs", "canine", "hound", "puppy", "doglike"},
+    "small": {"small", "little", "tiny", "miniature", "short", "young"},
+    "large": {"large", "big", "huge", "giant", "great"},
+}
+
+
 def search_dictionary_for_clue(
     clue, pattern, words_data, dictionary, index_tuple, selected_length="Any"
 ):
@@ -312,36 +321,35 @@ def search_dictionary_for_clue(
     if not clue_tokens:
         return []
 
-    num_clue_tokens = len(clue_tokens)
-    
-    # 1. Sort clue tokens by rarity (highest IDF first)
-    # This automatically finds words like 'feline' without needing a hardcoded cutoff
-    sorted_clue_tokens = sorted(
-        clue_tokens, key=lambda t: idf_scores.get(t, 0.0), reverse=True
-    )
-    
-    # The top 50% rarest tokens are designated as mandatory core descriptors
-    cutoff = max(1, math.ceil(num_clue_tokens * 0.5))
-    core_keywords = set(sorted_clue_tokens[:cutoff])
+    # 1. Expand clue tokens using semantic lookup
+    expanded_clue_tokens = set(clue_tokens)
+    for token in clue_tokens:
+        if token in CROSSWORD_SYNONYMS:
+            expanded_clue_tokens.update(CROSSWORD_SYNONYMS[token])
 
-    # 2. Candidate collection: gather candidates from core keywords first
+    # 2. Collect candidate words matching ANY expanded token
     candidate_words = set()
-    for token in core_keywords:
+    for token in expanded_clue_tokens:
         if token in dictionary_index:
             candidate_words.update(dictionary_index[token])
 
-    # Filter to valid crossword words
+    # Also add words whose actual dictionary ENTRY is one of our synonym targets
+    for token in expanded_clue_tokens:
+        if token in dictionary:
+            candidate_words.add(token)
+
+    # 3. Filter candidates to valid crossword words
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
-    # Filter by selected word length
+    # 4. Filter by word length
     if selected_length != "Any":
         candidate_words = {
             w for w in candidate_words 
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # Filter by optional regex pattern
+    # 5. Filter by pattern match
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -349,6 +357,7 @@ def search_dictionary_for_clue(
         except re.error:
             return []
 
+    # Prepare opposing words for hard filtering
     opposing_words = set()
     for token in clue_tokens:
         if token in ANTONYM_PAIRS:
@@ -370,47 +379,49 @@ def search_dictionary_for_clue(
 
         unique_def_tokens = set(definition_tokens)
 
-        # MANDATORY CHECK 1: Must contain ALL core keywords (e.g. 'feline')
-        if not core_keywords.issubset(unique_def_tokens):
+        # HARD ANTONYM FILTER: Immediately discard direct contradictions (e.g., 'large' for 'small')
+        if opposing_words and any(opp in unique_def_tokens for opp in opposing_words):
             continue
 
-        # MANDATORY CHECK 2: Must match at least 60% of all clue words
-        matched_tokens = [t for t in clue_tokens if t in unique_def_tokens]
+        # Match calculation against expanded token set
+        matched_tokens = [t for t in clue_tokens if t in unique_def_tokens or candidate in expanded_clue_tokens]
         matched_count = len(matched_tokens)
-        coverage_ratio = matched_count / num_clue_tokens
+        
+        # Count overlapping terms from expanded set
+        semantic_matches = sum(1 for t in expanded_clue_tokens if t in unique_def_tokens or t == candidate)
 
-        if num_clue_tokens >= 2 and coverage_ratio < 0.60:
+        if semantic_matches == 0:
             continue
 
         # --- SCORING ---
-        matched_idf = sum(idf_scores.get(t, 1.0) for t in matched_tokens)
-        base_score = matched_idf * 20.0
+        base_score = sum(idf_scores.get(t, 2.0) for t in matched_tokens) * 15.0
+        base_score += semantic_matches * 10.0
 
-        # Balanced definition length penalty
-        length_factor = 1.0 / (1.0 + 0.15 * math.log(max(def_length, 1)))
-        score = base_score * length_factor * (coverage_ratio ** 2)
+        # Gentle length penalty
+        length_factor = 1.0 / (1.0 + 0.10 * math.log(max(def_length, 1)))
+        score = base_score * length_factor
 
-        # Antonym / Contradiction penalty
-        if opposing_words and any(opp in unique_def_tokens for opp in opposing_words):
-            score *= 0.10
+        # Boost if candidate word itself is a direct synonym target (e.g. candidate='cat')
+        if candidate in expanded_clue_tokens:
+            score += 40.0
 
-        # Proximity boost (clue terms appear early in definition)
-        first_8 = set(definition_tokens[:8])
-        if sum(1 for t in clue_tokens if t in first_8) >= 2:
+        # Proximity boost
+        first_10 = set(definition_tokens[:10])
+        if sum(1 for t in clue_tokens if t in first_10) >= 1:
             score += 15.0
 
-        # Exact clue phrase bonus
+        # Exact phrase bonus
         if clue_lower in definition.lower():
             score += 35.0
 
-        # Noun preference (crossword answers are typically nouns)
+        # Noun preference
         pos = info.get("part_of_speech", "").lower()
         if "noun" in pos or "n." in pos:
-            score += 5.0
+            score += 8.0
         elif "adj" in pos:
             score -= 5.0
 
-        # Answer commonness boost
+        # Frequency bonus
         score += frequency_score(candidate) * 0.5
 
         if score > 0:
