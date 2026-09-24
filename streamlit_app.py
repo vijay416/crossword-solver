@@ -337,15 +337,24 @@ def get_most_important_token(clue_tokens, idf_scores):
 # ============================================================
 
 def split_into_senses(definition_text):
-    """Splits multi-sense dictionary strings across numbers, headers, and line breaks."""
+    """Splits multi-sense dictionary strings cleanly into individual definition senses."""
     if not definition_text:
         return []
 
-    senses = re.split(
-        r'(?:\r?\n+|\s*\d+\.\s*|\s*\b[A-Z]\.\s*|\s*\([a-z]\)\s*|\s*--\s*)',
+    # Split on sense numbers (1., 2.), domain markers, or double hyphens
+    raw_senses = re.split(
+        r'(?:\r?\n+|\s*\b\d+\.\s*|\s*\b[A-Z]\.\s*|\s*\([a-z0-9\.\s]+\)\s*|\s*--\s*)',
         definition_text
     )
-    return [s.strip() for s in senses if len(s.strip()) > 3]
+    
+    clean_senses = []
+    for sense in raw_senses:
+        s = sense.strip()
+        # Filter out short metadata fragments like "Zoöl." or "Astron."
+        if len(s) > 10:
+            clean_senses.append(s)
+
+    return clean_senses if clean_senses else [definition_text.strip()]
 
 
 def is_valid_direct_match(sense_text, concept_term):
@@ -464,37 +473,69 @@ def search_dictionary_for_clue(
                 continue
 
             # SCORING LOOP
-            # 1. Deduplicate clue tokens so IDF is counted AT MOST ONCE per token
+            # Split definition into distinct senses
+        senses = split_into_senses(full_definition)
+        best_sense_score = 0.0
+        best_sense_def = ""
+
+        for sense in senses:
+            sense_tokens = tokenize(sense)
+            sense_token_set = set(sense_tokens)
+            sense_length = len(sense_tokens)
+
+            if sense_length == 0:
+                continue
+
+            # Count unique clue tokens matched
             matched_tokens = set(clue_tokens) & sense_token_set
+            matched_count = len(matched_tokens)
+
+            # Strict coverage requirement for multi-word clues
+            coverage = matched_count / num_clue_tokens
+            if num_clue_tokens >= 2 and coverage < 0.5:
+                continue
+
+            # IDF sum for matched tokens
             matched_idf = sum(idf_scores.get(t, 2.0) for t in matched_tokens)
 
-            # 2. Lower base multiplier (10.0 instead of 25.0) to keep scores in a 0-100 range
+            # Base score
             sense_score = matched_idf * 10.0 * (coverage ** 2)
 
-            # 3. Apply logarithmic length penalty
-            sense_length = len(sense_tokens)
-            sense_score *= (1.0 / (1.0 + 0.15 * math.log(max(sense_length, 1))))
+            # Length normalization (ideal sense length is 5-20 words)
+            length_factor = 1.0 / (1.0 + 0.08 * math.log(max(sense_length, 1)))
+            sense_score *= length_factor
 
-            # 4. Moderate the exact substring bonus (reduced from +35.0 to +8.0)
+            # Proportional exact phrase bonus (rewards short, direct matches over long walls of text)
             if clue_lower in sense.lower():
-                sense_score += 8.0
+                phrase_density = len(clue_lower) / max(len(sense), 1)
+                sense_score += (15.0 * phrase_density)
 
-            # Track the highest scoring sense for this word
+            # Direct definition penalty if sense starts with "resembling a..." or "like a..."
+            lower_sense = sense.lower()
+            if any(lower_sense.startswith(prefix) for prefix in ["resembling", "like a", "pertaining to", "characteristic of"]):
+                sense_score *= 0.6
+
             if sense_score > best_sense_score:
                 best_sense_score = sense_score
-                best_sense_def = sense  # Save the matched sense!
+                best_sense_def = sense
 
         if best_sense_score > 0:
-            # 5. Add a mild common-word frequency bonus
-            best_sense_score += frequency_score(candidate) * 0.5
+            # Common word boost (e.g., CAT vs CATTISH)
+            freq = frequency_score(candidate)
+            best_sense_score += freq * 1.5
+
+            # Deduct points for adjectives/adverbs when looking for a general noun
+            pos = info.get("part_of_speech", "").lower()
+            if "adj" in pos or "adv" in pos:
+                best_sense_score *= 0.75
 
             results.append((
                 candidate.upper(),
                 round(best_sense_score, 1),
-                best_sense_def,  # <--- Return ONLY the matched sense, NOT full_definition
+                best_sense_def,  # Ensures ONLY the matched sense renders in Streamlit
                 info.get("part_of_speech", "")
             ))
-
+    
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
 
