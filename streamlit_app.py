@@ -304,19 +304,30 @@ def find_pattern_matches(pattern, words_data, dictionary, selected_length="Any")
 
 # Common opposite pairs for semantic checks
 ANTONYM_PAIRS = {
-    "small": {"large", "huge", "giant", "enormous", "big", "great"},
-    "tiny": {"large", "huge", "giant", "enormous", "big", "great"},
-    "little": {"large", "huge", "giant", "enormous", "big", "great"},
-    "large": {"small", "tiny", "little", "minute"},
-    "big": {"small", "tiny", "little", "minute"},
-    "hot": {"cold", "freezing", "chilly", "ice"},
-    "cold": {"hot", "warm", "boiling"},
+    "large": {"small", "little", "tiny", "miniature", "slight", "petty", "puny"},
+    "big": {"small", "little", "tiny", "miniature", "slight"},
+    "small": {"large", "big", "huge", "giant", "immense", "enormous", "great"},
+    "tiny": {"large", "big", "huge", "giant", "immense", "enormous", "great"},
+    "hot": {"cold", "freezing", "chilly", "icy", "cool"},
+    "cold": {"hot", "warm", "boiling", "steaming"},
+    "high": {"low", "short", "deep"},
+    "low": {"high", "tall", "lofty"},
 }
 
 COMPARISON_REGEX = re.compile(
     r'\b(size of a|resembling a|resembling the|like a|similar to|called also|allied to|type of)\b',
     re.IGNORECASE
 )
+
+def clean_definition_text(text: str) -> str:
+    """Removes trailing quotes, author attributions, and bracketed notes."""
+    # Remove quotation marks and text inside quotes
+    cleaned = re.sub(r'"[^"]*"', '', text)
+    # Strip bracketed usage tags like [Obs.] or [Zoöl.]
+    cleaned = re.sub(r'\[.*?\]', '', cleaned)
+    # Cut off text after common author citations or quotation indicators
+    cleaned = re.split(r'\b(?:Shak|Bacon|Chaucer|Fuller|Milton|Dryden)\b', cleaned)[0]
+    return cleaned.strip()
 
 def get_dynamic_synonyms(word):
     """Dynamically fetches synonyms and lemmas using WordNet for ANY word."""
@@ -374,44 +385,39 @@ def is_valid_direct_match(sense_text, concept_term):
 def search_dictionary_for_clue(
     clue, pattern, words_data, dictionary, index_tuple, selected_length="Any"
 ):
-    dictionary_index, idf_scores = index_tuple
+    if isinstance(index_tuple, tuple):
+        dictionary_index, idf_scores = index_tuple
+    else:
+        dictionary_index, idf_scores = index_tuple, {}
+
     clue_tokens = tokenize(clue)
     if not clue_tokens:
         return []
 
     num_clue_tokens = len(clue_tokens)
-    # 1. Dynamically identify the anchor (rarest) token in the clue
-    anchor_token = get_most_important_token(clue_tokens, idf_scores)
+    clue_lower = clue.lower().strip()
 
-    # 2. Build dynamic concept groups for ALL clue tokens using WordNet
-    clue_concepts = []
-    expanded_search_tokens = set(clue_tokens)
-
+    # Build set of contradictory terms from clue (e.g., if clue has 'large', track 'small')
+    contradictory_terms = set()
     for token in clue_tokens:
-        # Get dynamic synonyms instead of static hardcoded dicts
-        syn_group = get_dynamic_synonyms(token) if idf_scores.get(token, 0) > 3.0 else {token}
-        clue_concepts.append((token, syn_group))
-        expanded_search_tokens.update(syn_group)
+        if token in ANTONYM_PAIRS:
+            contradictory_terms.update(ANTONYM_PAIRS[token])
 
-    # 3. Fetch candidates matching any expanded search token
+    # Candidate collection
     candidate_words = set()
-    for token in expanded_search_tokens:
+    for token in clue_tokens:
         if token in dictionary_index:
             candidate_words.update(dictionary_index[token])
-        if token in dictionary:
-            candidate_words.add(token)
 
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
-    # Filter by word length
     if selected_length != "Any":
         candidate_words = {
             w for w in candidate_words 
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # Filter by regex pattern
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -419,12 +425,6 @@ def search_dictionary_for_clue(
         except re.error:
             return []
 
-    opposing_words = set()
-    for token in clue_tokens:
-        if token in ANTONYM_PAIRS:
-            opposing_words.update(ANTONYM_PAIRS[token])
-
-    clue_lower = clue.lower().strip()
     results = []
 
     for candidate in candidate_words:
@@ -434,98 +434,59 @@ def search_dictionary_for_clue(
             continue
 
         senses = split_into_senses(full_definition)
-        best_sense_score = -1.0
-        best_sense_def = ""
-
-        for sense in senses:
-            sense_tokens = tokenize(sense)
-            if not sense_tokens:
-                continue
-
-            sense_token_set = set(sense_tokens) | {candidate}
-
-            # Antonym Exclusion
-            if opposing_words and any(opp in sense_token_set for opp in opposing_words):
-                continue
-
-            # Concept Coverage
-            matched_concept_count = 0
-            has_anchor_match = False
-
-            for original_token, group in clue_concepts:
-                group_matches = [
-                    term for term in group 
-                    if term in sense_token_set and is_valid_direct_match(sense, term)
-                ]
-
-                if group_matches:
-                    matched_concept_count += 1
-                    # Enforce anchor token match dynamically
-                    if original_token == anchor_token:
-                        has_anchor_match = True
-
-            # Dynamic Rule: The rarest concept in the clue MUST be satisfied
-            if anchor_token and idf_scores.get(anchor_token, 0) > 4.0 and not has_anchor_match:
-                continue
-
-            total_concepts = len(clue_concepts)
-            coverage = matched_concept_count / total_concepts
-            if total_concepts >= 2 and coverage < 0.50:
-                continue
-
-            # SCORING LOOP
-            # Split definition into distinct senses
-        senses = split_into_senses(full_definition)
         best_sense_score = 0.0
         best_sense_def = ""
 
         for sense in senses:
-            sense_tokens = tokenize(sense)
+            # Clean out quotes and author citations before evaluating tokens
+            cleaned_sense = clean_definition_text(sense)
+            sense_tokens = tokenize(cleaned_sense)
             sense_token_set = set(sense_tokens)
             sense_length = len(sense_tokens)
 
             if sense_length == 0:
                 continue
 
+            # --- ANTONYM / CONTRADICTION PENALTY ---
+            # If clue says 'large' and definition starts with or contains 'small', heavily penalize it
+            if contradictory_terms and any(term in sense_token_set for term in contradictory_terms):
+                continue  # Hard filter: drops POOL immediately for 'large body of water'
+
             # Count unique clue tokens matched
             matched_tokens = set(clue_tokens) & sense_token_set
             matched_count = len(matched_tokens)
 
-            # Strict coverage requirement for multi-word clues
+            # Mandatory coverage threshold
             coverage = matched_count / num_clue_tokens
             if num_clue_tokens >= 2 and coverage < 0.5:
                 continue
 
-            # IDF sum for matched tokens
+            # IDF Score
             matched_idf = sum(idf_scores.get(t, 2.0) for t in matched_tokens)
-
-            # Base score
             sense_score = matched_idf * 10.0 * (coverage ** 2)
 
-            # Length normalization (ideal sense length is 5-20 words)
+            # Length factor
             length_factor = 1.0 / (1.0 + 0.08 * math.log(max(sense_length, 1)))
             sense_score *= length_factor
 
-            # Proportional exact phrase bonus (rewards short, direct matches over long walls of text)
-            if clue_lower in sense.lower():
-                phrase_density = len(clue_lower) / max(len(sense), 1)
-                sense_score += (15.0 * phrase_density)
+            # Proximity boost if key clue tokens appear in the first 6 words of the definition
+            first_words = set(sense_tokens[:6])
+            if len(set(clue_tokens) & first_words) >= 2:
+                sense_score += 15.0
 
-            # Direct definition penalty if sense starts with "resembling a..." or "like a..."
-            lower_sense = sense.lower()
-            if any(lower_sense.startswith(prefix) for prefix in ["resembling", "like a", "pertaining to", "characteristic of"]):
-                sense_score *= 0.6
+            # Substring match bonus
+            if clue_lower in cleaned_sense.lower():
+                phrase_density = len(clue_lower) / max(len(cleaned_sense), 1)
+                sense_score += (15.0 * phrase_density)
 
             if sense_score > best_sense_score:
                 best_sense_score = sense_score
-                best_sense_def = sense
+                best_sense_def = cleaned_sense
 
         if best_sense_score > 0:
-            # Common word boost (e.g., CAT vs CATTISH)
             freq = frequency_score(candidate)
             best_sense_score += freq * 1.5
 
-            # Deduct points for adjectives/adverbs when looking for a general noun
             pos = info.get("part_of_speech", "").lower()
             if "adj" in pos or "adv" in pos:
                 best_sense_score *= 0.75
@@ -533,10 +494,10 @@ def search_dictionary_for_clue(
             results.append((
                 candidate.upper(),
                 round(best_sense_score, 1),
-                best_sense_def,  # Ensures ONLY the matched sense renders in Streamlit
+                best_sense_def,
                 info.get("part_of_speech", "")
             ))
-    
+
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
 
