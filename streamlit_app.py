@@ -313,6 +313,12 @@ CONCEPT_GROUPS = {
     "animal": {"animal", "beast", "creature", "quadruped", "carnivore", "mammal"},
 }
 
+def split_into_senses(definition_text):
+    """Splits multi-sense dictionary strings into individual definition senses."""
+    # Split by numbered definitions like "1.", "2.", or "3."
+    senses = re.split(r'\s*\d+\.\s*', definition_text)
+    return [s.strip() for s' in senses if s.strip()]
+
 
 def search_dictionary_for_clue(
     clue, pattern, words_data, dictionary, index_tuple, selected_length="Any"
@@ -322,19 +328,19 @@ def search_dictionary_for_clue(
     if not clue_tokens:
         return []
 
-    # 1. Group clue tokens into distinct conceptual requirements
+    # Map clue tokens to concepts
     clue_concepts = []
     expanded_search_tokens = set(clue_tokens)
 
     for token in clue_tokens:
         if token in CONCEPT_GROUPS:
             group = CONCEPT_GROUPS[token]
-            clue_concepts.append(group)
+            clue_concepts.append((token, group))
             expanded_search_tokens.update(group)
         else:
-            clue_concepts.append({token})
+            clue_concepts.append((token, {token}))
 
-    # 2. Gather candidates matching search tokens
+    # Candidate collection
     candidate_words = set()
     for token in expanded_search_tokens:
         if token in dictionary_index:
@@ -342,18 +348,18 @@ def search_dictionary_for_clue(
         if token in dictionary:
             candidate_words.add(token)
 
-    # 3. Filter to valid crossword words
+    # Crossword word filter
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
-    # 4. Filter by word length
+    # Word length filter
     if selected_length != "Any":
         candidate_words = {
-            w for w in candidate_words
+            w for w in candidate_words 
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # 5. Filter by regex pattern
+    # Regex pattern filter
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -361,7 +367,6 @@ def search_dictionary_for_clue(
         except re.error:
             return []
 
-    # Antonym tracking
     opposing_words = set()
     for token in clue_tokens:
         if token in ANTONYM_PAIRS:
@@ -372,74 +377,85 @@ def search_dictionary_for_clue(
 
     for candidate in candidate_words:
         info = dictionary.get(candidate, {})
-        definition = info.get("definition", "")
-        if not definition:
+        full_definition = info.get("definition", "")
+        if not full_definition:
             continue
 
-        definition_tokens = tokenize(definition)
-        def_length = len(definition_tokens)
-        if def_length == 0:
-            continue
+        # Split long definitions into isolated senses
+        senses = split_into_senses(full_definition)
+        
+        best_sense_score = -1.0
+        best_sense_def = ""
 
-        # Combine entry word + definition tokens to check full semantic content
-        full_text_tokens = set(definition_tokens) | {candidate}
+        for sense in senses:
+            sense_tokens = tokenize(sense)
+            if not sense_tokens:
+                continue
 
-        # HARD ANTONYM FILTER
-        if opposing_words and any(opp in full_text_tokens for opp in opposing_words):
-            continue
+            sense_token_set = set(sense_tokens) | {candidate}
 
-        # --- CONCEPT COVERAGE CHECK ---
-        # Count how many DISTINCT concepts in the clue are matched
-        matched_concepts_count = 0
-        for concept_set in clue_concepts:
-            if any(term in full_text_tokens for term in concept_set):
-                matched_concepts_count += 1
+            # Hard Antonym Exclusion per sense
+            if opposing_words and any(opp in sense_token_set for opp in opposing_words):
+                continue
 
-        total_concepts = len(clue_concepts)
-        concept_coverage = matched_concepts_count / total_concepts
+            # Check concept coverage inside THIS SINGLE SENSE
+            matched_concept_count = 0
+            has_feline_concept = False
 
-        # DISCARD candidates that don't match at least 66% of the clue's concepts
-        if total_concepts >= 2 and concept_coverage < 0.66:
-            continue
+            for original_token, group in clue_concepts:
+                if any(term in sense_token_set for term in group):
+                    matched_concept_count += 1
+                    if original_token == "feline":
+                        has_feline_concept = True
 
-        # --- SCORING ---
-        # Base IDF score for matched words in definition
-        matched_idf = sum(
-            idf_scores.get(t, 1.5) for t in clue_tokens if t in full_text_tokens
-        )
-        score = matched_idf * 20.0
+            # CRITICAL RULE 1: If clue asks for 'feline', this sense MUST match feline
+            if "feline" in clue_tokens and not has_feline_concept:
+                continue
 
-        # Multiply heavily by concept coverage squared
-        score *= (concept_coverage ** 3)
+            # CRITICAL RULE 2: Must match at least 66% of clue concepts in ONE sense
+            total_concepts = len(clue_concepts)
+            coverage = matched_concept_count / total_concepts
+            if total_concepts >= 2 and coverage < 0.66:
+                continue
 
-        # Length normalization penalty
-        length_factor = 1.0 / (1.0 + 0.12 * math.log(max(def_length, 1)))
-        score *= length_factor
+            # Base IDF score calculated ONLY on this sense
+            matched_idf = sum(
+                idf_scores.get(t, 2.0) for t in clue_tokens if t in sense_token_set
+            )
+            
+            # Score formula
+            sense_score = matched_idf * 25.0 * (coverage ** 3)
 
-        # Proximity boost (first 10 tokens)
-        first_10 = set(definition_tokens[:10])
-        if sum(1 for t in clue_tokens if t in first_10) >= 1:
-            score += 15.0
+            # Sense length penalty (penalizes only the current sense length)
+            sense_length = len(sense_tokens)
+            sense_score *= (1.0 / (1.0 + 0.10 * math.log(max(sense_length, 1))))
 
-        # Exact clue phrase bonus
-        if clue_lower in definition.lower():
-            score += 35.0
+            # Exact match or proximity boosts
+            first_10 = set(sense_tokens[:10])
+            if sum(1 for t in clue_tokens if t in first_10) >= 1:
+                sense_score += 15.0
 
-        # Noun preference (crossword answers are overwhelmingly nouns)
-        pos = info.get("part_of_speech", "").lower()
-        if "noun" in pos or "n." in pos:
-            score += 10.0
-        elif "adj" in pos:
-            score -= 10.0  # Penalize adjectives like TINY, CATLIKE, MINIATURE
+            if clue_lower in sense.lower():
+                sense_score += 35.0
 
-        # Answer frequency boost
-        score += frequency_score(candidate) * 0.5
+            if sense_score > best_sense_score:
+                best_sense_score = sense_score
+                best_sense_def = sense
 
-        if score > 0:
+        if best_sense_score > 0:
+            # Apply global candidate metadata bonuses (POS, Answer Frequency)
+            pos = info.get("part_of_speech", "").lower()
+            if "noun" in pos or "n." in pos:
+                best_sense_score += 10.0
+            elif "adj" in pos:
+                best_sense_score -= 10.0
+
+            best_sense_score += frequency_score(candidate) * 0.5
+
             results.append((
                 candidate.upper(),
-                score,
-                definition,
+                best_sense_score,
+                full_definition,
                 info.get("part_of_speech", "")
             ))
 
