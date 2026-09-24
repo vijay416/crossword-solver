@@ -337,6 +337,36 @@ def get_most_important_token(clue_tokens, idf_scores):
         return None
     return max(clue_tokens, key=lambda t: idf_scores.get(t, 1.0))
 
+# ============================================================
+# HELPER FUNCTIONS (Must be defined BEFORE search_dictionary_for_clue)
+# ============================================================
+
+def split_into_senses(definition_text):
+    """Splits multi-sense dictionary strings across numbers, headers, and line breaks."""
+    if not definition_text:
+        return []
+
+    senses = re.split(
+        r'(?:\r?\n+|\s*\d+\.\s*|\s*\b[A-Z]\.\s*|\s*\([a-z]\)\s*|\s*--\s*)',
+        definition_text
+    )
+    return [s.strip() for s in senses if len(s.strip()) > 3]
+
+
+def is_valid_direct_match(sense_text, concept_term):
+    """Ensures concept terms aren't part of comparative clauses (e.g., 'resembling a...')."""
+    lower_sense = sense_text.lower()
+    if concept_term not in lower_sense:
+        return False
+    
+    for match in COMPARISON_REGEX.finditer(lower_sense):
+        end_idx = match.end() + 25
+        if lower_sense.find(concept_term, match.start(), end_idx) != -1:
+            return False
+            
+    return True
+
+
 def search_dictionary_for_clue(
     clue, pattern, words_data, dictionary, index_tuple, selected_length="Any"
 ):
