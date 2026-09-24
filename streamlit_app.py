@@ -151,6 +151,31 @@ def crossword_score(word: str, clean_word: str, dictionary: dict) -> float:
     return score
 
 
+# ==========================================================
+# HIGHLIGHT CLUE MATCHES
+# ==========================================================
+
+def highlight_clue_matches(definition, clue):
+    clue_tokens = tokenize(clue)
+
+    if not clue_tokens:
+        return definition
+
+    highlighted = definition
+
+    for token in sorted(clue_tokens, key=len, reverse=True):
+
+        pattern = rf"\b({re.escape(token)})\b"
+
+        highlighted = re.sub(
+            pattern,
+            r"<mark>\1</mark>",
+            highlighted,
+            flags=re.IGNORECASE
+        )
+
+    return highlighted
+
 # ============================================================
 # DATA LOADERS & INDEXERS
 # ============================================================
@@ -462,7 +487,7 @@ with tab2:
                     st.markdown(f"<div class='clue-result-word'>#{rank} &nbsp; {word}</div>", unsafe_allow_html=True)
                     if part_of_speech:
                         st.markdown(f"<div class='crossword-pos'>{part_of_speech}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div class='clue-result-definition'>{definition}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='clue-result-definition'>{highlight_clue_matches(definition,clue)}</div>", unsafe_allow_html=True)
                     st.caption(f"Match score: {score:.1f}")
                     st.divider()
 
