@@ -314,6 +314,14 @@ ANTONYM_PAIRS = {
     "low": {"high", "tall", "lofty"},
 }
 
+CONCEPT_GROUPS = {
+    "feline": {"feline", "cat", "cats", "felid", "felidae", "felis", "catlike", "kitten", "kittens"},
+    "canine": {"canine", "dog", "dogs", "hound", "puppy", "doglike", "canis"},
+    "equine": {"equine", "horse", "horses", "colt", "equus", "steed"},
+    "bovine": {"bovine", "cow", "cows", "bull", "cattle", "ox", "oxen", "bos"},
+    "simian": {"simian", "monkey", "monkeys", "ape", "apes"},
+}
+
 GENERIC_CLUE_WORDS = {
     "small", "large", "animal", "figure", "kind", "type", "part",
     "state", "quality", "act", "one", "thing", "make", "cause", "used"
@@ -402,31 +410,24 @@ def search_dictionary_for_clue(
     num_clue_tokens = len(clue_tokens)
     clue_lower = clue.lower().strip()
 
-    # 1. Identify mandatory core keywords (non-generic tokens with highest IDF)
-    rare_clue_tokens = [
-        t for t in clue_tokens 
-        if t not in GENERIC_CLUE_WORDS and idf_scores.get(t, 0.0) >= 4.5
-    ]
-    
-    # If no rare tokens pass the threshold, fall back to the single highest-IDF token
-    if not rare_clue_tokens and clue_tokens:
-        rare_clue_tokens = [max(clue_tokens, key=lambda t: idf_scores.get(t, 0.0))]
+    # Expand search tokens to include concept synonyms
+    expanded_search_tokens = set(clue_tokens)
+    core_concept_groups = []
 
-    # 2. Gather candidates starting ONLY from the mandatory rare keywords
+    for t in clue_tokens:
+        if t in CONCEPT_GROUPS:
+            group = CONCEPT_GROUPS[t]
+            expanded_search_tokens.update(group)
+            core_concept_groups.append(group)
+        elif t not in GENERIC_CLUE_WORDS and idf_scores.get(t, 0.0) >= 3.5:
+            group = {t}
+            core_concept_groups.append(group)
+
+    # Gather candidate words using expanded tokens
     candidate_words = set()
-    for token in rare_clue_tokens:
+    for token in expanded_search_tokens:
         if token in dictionary_index:
-            if not candidate_words:
-                candidate_words = set(dictionary_index[token])
-            else:
-                # Intersect to require ALL rare keywords if multiple exist
-                candidate_words &= dictionary_index[token]
-
-    # Fallback to standard candidate gathering if intersection yields no results
-    if not candidate_words:
-        for token in clue_tokens:
-            if token in dictionary_index:
-                candidate_words.update(dictionary_index[token])
+            candidate_words.update(dictionary_index[token])
 
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
@@ -438,7 +439,7 @@ def search_dictionary_for_clue(
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # Filter by optional regex pattern
+    # Filter by pattern match
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -467,14 +468,19 @@ def search_dictionary_for_clue(
         for sense in senses:
             cleaned_sense = clean_definition_text(sense)
             sense_tokens = tokenize(cleaned_sense)
-            sense_token_set = set(sense_tokens)
+            sense_token_set = set(sense_tokens) | {candidate}  # Allow candidate headword match
             sense_length = len(sense_tokens)
 
             if sense_length == 0:
                 continue
 
-            # MANDATORY CHECK: Definition MUST contain all rare core keywords
-            if rare_clue_tokens and not all(rt in sense_token_set for rt in rare_clue_tokens):
+            # Check core concept coverage
+            concepts_matched = sum(
+                1 for group in core_concept_groups if any(term in sense_token_set for term in group)
+            )
+
+            # Require at least one non-generic concept match if core concepts exist
+            if core_concept_groups and concepts_matched == 0:
                 continue
 
             # Antonym penalty
@@ -485,10 +491,10 @@ def search_dictionary_for_clue(
             matched_count = len(matched_tokens)
 
             coverage = matched_count / num_clue_tokens
-            if num_clue_tokens >= 2 and coverage < 0.5:
+            if num_clue_tokens >= 2 and coverage < 0.33 and concepts_matched == 0:
                 continue
 
-            # Calculate weighted IDF sum (generic tokens get reduced weight)
+            # Calculate weighted IDF score
             matched_idf = 0.0
             for t in matched_tokens:
                 weight = 0.5 if t in GENERIC_CLUE_WORDS else 2.0
@@ -496,13 +502,18 @@ def search_dictionary_for_clue(
 
             sense_score = matched_idf * 10.0 * (coverage ** 2)
 
-            # Length normalization factor
+            # Boost score based on core concept group matches
+            if core_concept_groups:
+                concept_coverage = concepts_matched / len(core_concept_groups)
+                sense_score *= (1.0 + 2.0 * concept_coverage)
+
+            # Length factor
             length_factor = 1.0 / (1.0 + 0.08 * math.log(max(sense_length, 1)))
             sense_score *= length_factor
 
-            # Proximity bonus if core clue terms appear early in the sentence
+            # Proximity bonus if concept terms appear early in the definition
             first_words = set(sense_tokens[:8])
-            if rare_clue_tokens and any(rt in first_words for rt in rare_clue_tokens):
+            if any(group & first_words for group in core_concept_groups):
                 sense_score += 15.0
 
             # Substring match bonus
@@ -531,7 +542,7 @@ def search_dictionary_for_clue(
 
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
-    
+
 # ============================================================
 # INITIALIZE DATA
 # ============================================================
