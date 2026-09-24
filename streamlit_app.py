@@ -407,9 +407,8 @@ with tab1:
         # Form submit button replaces regular st.button
         search_clicked = st.form_submit_button("🔍 Search", type="primary")
 
+    # 1. Update session state ONLY when the search button is pressed
     if search_clicked:
-        # Search logic only executes here when submit is pressed
-    
         if not pattern.strip():
             st.warning("Please enter a pattern.")
             st.session_state.pattern_results = []
@@ -421,9 +420,11 @@ with tab1:
                 )
                 st.session_state.last_pattern = pattern.upper()
 
-        results = st.session_state.get("pattern_results", [])
-        last_pattern = st.session_state.get("last_pattern", "")
+    # 2. Always fetch results from session state (outside if search_clicked)
+    results = st.session_state.get("pattern_results", [])
+    last_pattern = st.session_state.get("last_pattern", "")
 
+    # 3. Render results (outside if search_clicked)
     if results:
         st.markdown(f"**Top {len(results)} possibilities for `{last_pattern}`**")
 
@@ -448,7 +449,6 @@ with tab1:
 
     elif last_pattern:
         st.info("No matching words found.")
-
 
 # ------------------------------------------------------------
 # TAB 2: DICTIONARY CLUE SOLVER
