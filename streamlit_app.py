@@ -314,6 +314,11 @@ ANTONYM_PAIRS = {
     "low": {"high", "tall", "lofty"},
 }
 
+GENERIC_CLUE_WORDS = {
+    "small", "large", "animal", "figure", "kind", "type", "part",
+    "state", "quality", "act", "one", "thing", "make", "cause", "used"
+}
+
 COMPARISON_REGEX = re.compile(
     r'\b(size of a|resembling a|resembling the|like a|similar to|called also|allied to|type of)\b',
     re.IGNORECASE
@@ -397,33 +402,55 @@ def search_dictionary_for_clue(
     num_clue_tokens = len(clue_tokens)
     clue_lower = clue.lower().strip()
 
-    # Build set of contradictory terms from clue (e.g., if clue has 'large', track 'small')
-    contradictory_terms = set()
-    for token in clue_tokens:
-        if token in ANTONYM_PAIRS:
-            contradictory_terms.update(ANTONYM_PAIRS[token])
+    # 1. Identify mandatory core keywords (non-generic tokens with highest IDF)
+    rare_clue_tokens = [
+        t for t in clue_tokens 
+        if t not in GENERIC_CLUE_WORDS and idf_scores.get(t, 0.0) >= 4.5
+    ]
+    
+    # If no rare tokens pass the threshold, fall back to the single highest-IDF token
+    if not rare_clue_tokens and clue_tokens:
+        rare_clue_tokens = [max(clue_tokens, key=lambda t: idf_scores.get(t, 0.0))]
 
-    # Candidate collection
+    # 2. Gather candidates starting ONLY from the mandatory rare keywords
     candidate_words = set()
-    for token in clue_tokens:
+    for token in rare_clue_tokens:
         if token in dictionary_index:
-            candidate_words.update(dictionary_index[token])
+            if not candidate_words:
+                candidate_words = set(dictionary_index[token])
+            else:
+                # Intersect to require ALL rare keywords if multiple exist
+                candidate_words &= dictionary_index[token]
+
+    # Fallback to standard candidate gathering if intersection yields no results
+    if not candidate_words:
+        for token in clue_tokens:
+            if token in dictionary_index:
+                candidate_words.update(dictionary_index[token])
 
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
+    # Filter by exact letter count
     if selected_length != "Any":
         candidate_words = {
             w for w in candidate_words 
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
+    # Filter by optional regex pattern
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
             candidate_words = {w for w in candidate_words if regex.fullmatch(w)}
         except re.error:
             return []
+
+    # Antonym tracking
+    contradictory_terms = set()
+    for token in clue_tokens:
+        if token in ANTONYM_PAIRS:
+            contradictory_terms.update(ANTONYM_PAIRS[token])
 
     results = []
 
@@ -438,7 +465,6 @@ def search_dictionary_for_clue(
         best_sense_def = ""
 
         for sense in senses:
-            # Clean out quotes and author citations before evaluating tokens
             cleaned_sense = clean_definition_text(sense)
             sense_tokens = tokenize(cleaned_sense)
             sense_token_set = set(sense_tokens)
@@ -447,31 +473,36 @@ def search_dictionary_for_clue(
             if sense_length == 0:
                 continue
 
-            # --- ANTONYM / CONTRADICTION PENALTY ---
-            # If clue says 'large' and definition starts with or contains 'small', heavily penalize it
-            if contradictory_terms and any(term in sense_token_set for term in contradictory_terms):
-                continue  # Hard filter: drops POOL immediately for 'large body of water'
+            # MANDATORY CHECK: Definition MUST contain all rare core keywords
+            if rare_clue_tokens and not all(rt in sense_token_set for rt in rare_clue_tokens):
+                continue
 
-            # Count unique clue tokens matched
+            # Antonym penalty
+            if contradictory_terms and any(term in sense_token_set for term in contradictory_terms):
+                continue
+
             matched_tokens = set(clue_tokens) & sense_token_set
             matched_count = len(matched_tokens)
 
-            # Mandatory coverage threshold
             coverage = matched_count / num_clue_tokens
             if num_clue_tokens >= 2 and coverage < 0.5:
                 continue
 
-            # IDF Score
-            matched_idf = sum(idf_scores.get(t, 2.0) for t in matched_tokens)
+            # Calculate weighted IDF sum (generic tokens get reduced weight)
+            matched_idf = 0.0
+            for t in matched_tokens:
+                weight = 0.5 if t in GENERIC_CLUE_WORDS else 2.0
+                matched_idf += idf_scores.get(t, 1.0) * weight
+
             sense_score = matched_idf * 10.0 * (coverage ** 2)
 
-            # Length factor
+            # Length normalization factor
             length_factor = 1.0 / (1.0 + 0.08 * math.log(max(sense_length, 1)))
             sense_score *= length_factor
 
-            # Proximity boost if key clue tokens appear in the first 6 words of the definition
-            first_words = set(sense_tokens[:6])
-            if len(set(clue_tokens) & first_words) >= 2:
+            # Proximity bonus if core clue terms appear early in the sentence
+            first_words = set(sense_tokens[:8])
+            if rare_clue_tokens and any(rt in first_words for rt in rare_clue_tokens):
                 sense_score += 15.0
 
             # Substring match bonus
@@ -500,7 +531,7 @@ def search_dictionary_for_clue(
 
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
-
+    
 # ============================================================
 # INITIALIZE DATA
 # ============================================================
