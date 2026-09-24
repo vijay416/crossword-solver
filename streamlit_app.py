@@ -312,34 +312,31 @@ def search_dictionary_for_clue(
     if not clue_tokens:
         return []
 
-    # Calculate total available IDF weight in the clue
+    num_clue_tokens = len(clue_tokens)
     total_clue_idf = sum(idf_scores.get(t, 1.0) for t in clue_tokens)
 
-    # Find high-value ("rare/descriptive") words in clue
-    # Words with IDF >= 5.0 are key descriptors (e.g., 'feline')
-    rare_clue_tokens = [t for t in clue_tokens if idf_scores.get(t, 0) >= 5.0]
+    # 1. Identify rare/descriptive terms in clue (IDF >= 4.5)
+    rare_clue_tokens = [t for t in clue_tokens if idf_scores.get(t, 0) >= 4.5]
 
-    # 1. Gather candidates matching clue tokens
+    # Candidate retrieval
     candidate_words = set()
-    
-    # Prioritize matching rare tokens first
     search_tokens = rare_clue_tokens if rare_clue_tokens else clue_tokens
     for token in search_tokens:
         if token in dictionary_index:
             candidate_words.update(dictionary_index[token])
 
-    # 2. Restrict to valid crossword words
+    # Filter to valid crossword dictionary
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
-    # 3. Apply exact length filter
+    # Filter by exact word length
     if selected_length != "Any":
         candidate_words = {
             w for w in candidate_words 
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # 4. Apply pattern filter
+    # Filter by wildcard pattern
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -347,7 +344,6 @@ def search_dictionary_for_clue(
         except re.error:
             return []
 
-    # Antonym check prep
     opposing_words = set()
     for token in clue_tokens:
         if token in ANTONYM_PAIRS:
@@ -362,69 +358,78 @@ def search_dictionary_for_clue(
         if not definition:
             continue
 
-        definition_lower = definition.lower()
         definition_tokens = tokenize(definition)
         def_length = len(definition_tokens)
-        
         if def_length == 0:
             continue
 
         unique_def_tokens = set(definition_tokens)
 
-        # MANDATORY CHECK: If clue has key descriptive words (like 'feline'),
-        # candidate MUST contain at least one of them
+        # --- MANDATORY COVERAGE RULES ---
+        # 1. Must contain rare clue token if present
         if rare_clue_tokens and not any(rt in unique_def_tokens for rt in rare_clue_tokens):
             continue
 
-        # --- Weighted Match Calculation ---
-        matched_idf = 0.0
-        matched_count = 0
+        # 2. Count matched clue tokens
+        matched_tokens = [t for t in clue_tokens if t in unique_def_tokens]
+        matched_count = len(matched_tokens)
+        matched_idf = sum(idf_scores.get(t, 1.0) for t in matched_tokens)
 
-        for token in clue_tokens:
-            if token in unique_def_tokens:
-                matched_idf += idf_scores.get(token, 1.0)
-                matched_count += 1
-
-        # Calculate percentage of clue's total importance matched
+        # 3. Clue Concept Coverage Ratio (Count-based & IDF-based)
+        token_coverage_ratio = matched_count / num_clue_tokens
         idf_coverage_ratio = matched_idf / total_clue_idf if total_clue_idf > 0 else 0
 
-        # Reject candidates matching less than 40% of total clue importance
-        if idf_coverage_ratio < 0.40:
+        # Require matching at least 50% of the clue tokens when clue has multiple words
+        if num_clue_tokens >= 2 and token_coverage_ratio < 0.5:
             continue
 
-        # Score calculation based on weighted IDF match
-        base_score = matched_idf * 15.0
+        # --- SCORING ---
+        # Base score driven directly by matched IDF weight
+        score = matched_idf * 20.0
 
-        # Length Normalization (milder penalty curve)
-        length_factor = 1.0 / (1.0 + math.log10(max(def_length, 1)))
-        final_score = base_score * length_factor * idf_coverage_ratio
+        # Smooth length penalty (prevents 2-word definitions like 'CATTISH' from getting 10x score)
+        # Ideal definition length is ~8-25 words.
+        length_factor = 1.0 / (1.0 + 0.15 * math.log(max(def_length, 1)))
+        score *= length_factor
 
-        # --- Contradiction Penalty ---
+        # Multiply by coverage squared to heavily reward matching MORE clue words
+        score *= (token_coverage_ratio ** 2)
+
+        # Antonym / Contradiction penalty
         if opposing_words and any(opp in unique_def_tokens for opp in opposing_words):
-            final_score *= 0.15
+            score *= 0.1
 
-        # --- Proximity Boost ---
-        first_10 = set(definition_tokens[:10])
-        if sum(1 for t in clue_tokens if t in first_10) >= 2:
-            final_score += 20.0
+        # Proximity boost: clue tokens appear early in definition
+        first_8 = set(definition_tokens[:8])
+        early_matches = sum(1 for t in clue_tokens if t in first_8)
+        if early_matches >= 2:
+            score += 15.0
 
-        # --- Substring / Exact match bonus ---
-        if clue_lower in definition_lower:
-            final_score += 40.0
+        # Substring / Exact match bonus
+        if clue_lower in definition.lower():
+            score += 35.0
 
-        # --- Answer Frequency Boost ---
-        final_score += frequency_score(candidate) * 0.5
+        # Part of Speech / Noun priority heuristic (prefers concrete nouns)
+        pos = info.get("part_of_speech", "").lower()
+        if "noun" in pos or "n." in pos:
+            score += 5.0
+        elif "adj" in pos:
+            score -= 5.0  # Penalize adjectives like CATTISH
 
-        if final_score > 0:
+        # Answer frequency boost
+        score += frequency_score(candidate) * 0.5
+
+        if score > 0:
             results.append((
                 candidate.upper(),
-                final_score,
+                score,
                 definition,
                 info.get("part_of_speech", "")
             ))
 
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
+
 
 # ============================================================
 # INITIALIZE DATA
