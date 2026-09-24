@@ -1,3 +1,4 @@
+import math
 import json
 import re
 from collections import Counter
@@ -241,16 +242,30 @@ def load_dictionary():
 
 
 @st.cache_data
-def build_dictionary_search_index(dictionary):
-    """Build reverse search index (definition word -> dictionary words)."""
+def build_dictionary_search_index_with_idf(dictionary):
+    """
+    Builds a reverse index AND pre-calculates Inverse Document Frequency (IDF) 
+    scores for every token in the dictionary.
+    """
     index = {}
+    doc_count = len(dictionary)
+    doc_frequencies = Counter()
+
     for dict_word, info in dictionary.items():
         tokens = set(tokenize(info.get("definition", "")))
         for token in tokens:
-            if token not in index:
-                index[token] = set()
-            index[token].add(dict_word)
-    return index
+            index.setdefault(token, set()).add(dict_word)
+            doc_frequencies[token] += 1
+
+    # IDF = log(Total Documents / Documents containing token)
+    # Rare words (e.g., 'feline') get high IDF (~8-10)
+    # Common words (e.g., 'animal', 'small') get low IDF (~2-3)
+    idf_scores = {
+        token: math.log(doc_count / count) 
+        for token, count in doc_frequencies.items()
+    }
+
+    return index, idf_scores
 
 
 # ============================================================
@@ -280,30 +295,31 @@ def find_pattern_matches(pattern, words_data, dictionary, selected_length="Any")
 
 
 def search_dictionary_for_clue(
-    clue, pattern, words_data, dictionary, dictionary_index, selected_length="Any"
+    clue, pattern, words_data, dictionary, index_tuple, selected_length="Any"
 ):
+    dictionary_index, idf_scores = index_tuple
     clue_tokens = tokenize(clue)
     if not clue_tokens:
         return []
 
-    # Filter candidate words via search index
+    # 1. Gather candidates matching ANY clue token
     candidate_words = set()
     for token in clue_tokens:
         if token in dictionary_index:
             candidate_words.update(dictionary_index[token])
 
-    # Filter candidates to actual crossword word set
+    # 2. Restrict candidates to valid crossword words
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
-    # Restrict by word length if selected
+    # 3. Apply exact length filter
     if selected_length != "Any":
         candidate_words = {
-            w for w in candidate_words
+            w for w in candidate_words 
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # Restrict by pattern if supplied
+    # 4. Apply pattern filter
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -321,34 +337,49 @@ def search_dictionary_for_clue(
             continue
 
         definition_lower = definition.lower()
-        score = 0.0
-
-        if clue_lower in definition_lower:
-            score += 30.0
-
         definition_tokens = tokenize(definition)
-        definition_counter = Counter(definition_tokens)
+        def_length = len(definition_tokens)
+        
+        if def_length == 0:
+            continue
+
+        # --- TF-IDF Scoring ---
+        overlap_score = 0.0
+        unique_def_tokens = set(definition_tokens)
+        matched_clue_tokens = 0
 
         for token in clue_tokens:
-            if token in definition_counter:
-                score += 10.0
-                score += min(definition_counter[token] - 1, 3) * 2.0
+            if token in unique_def_tokens:
+                # Add token's IDF weight instead of a flat constant
+                overlap_score += idf_scores.get(token, 1.0) * 10.0
+                matched_clue_tokens += 1
 
-        if len(candidate) <= 5:
-            score += 2.0
+        # Penalize definitions that match only 1 out of 3+ clue words
+        clue_coverage_ratio = matched_clue_tokens / len(clue_tokens)
+        if len(clue_tokens) >= 2 and matched_clue_tokens < 2:
+            overlap_score *= 0.3  # Heavily penalize partial matches like 'TYPE'
 
-        score += frequency_score(candidate) * 1.5
+        # Length normalization: prevents multi-paragraph entries from dominating
+        length_penalty = math.log(def_length + 10)
+        final_score = (overlap_score / length_penalty) * clue_coverage_ratio
 
-        results.append((
-            candidate.upper(),
-            score,
-            definition,
-            info.get("part_of_speech", "")
-        ))
+        # Exact phrase bonus
+        if clue_lower in definition_lower:
+            final_score += 50.0
+
+        # Frequency bonus for common crossword answers
+        final_score += frequency_score(candidate) * 0.5
+
+        if final_score > 0:
+            results.append((
+                candidate.upper(),
+                final_score,
+                definition,
+                info.get("part_of_speech", "")
+            ))
 
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
-
 
 # ============================================================
 # INITIALIZE DATA
@@ -356,7 +387,7 @@ def search_dictionary_for_clue(
 
 words_data = load_words()
 dictionary = load_dictionary()
-dictionary_index = build_dictionary_search_index(dictionary)
+dictionary_index = build_dictionary_search_index_with_idf(dictionary)
 
 
 # ============================================================
