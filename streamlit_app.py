@@ -379,6 +379,7 @@ def search_dictionary_for_clue(
     if not clue_tokens:
         return []
 
+    num_clue_tokens = len(clue_tokens)
     # 1. Dynamically identify the anchor (rarest) token in the clue
     anchor_token = get_most_important_token(clue_tokens, idf_scores)
 
