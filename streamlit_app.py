@@ -313,30 +313,35 @@ def search_dictionary_for_clue(
         return []
 
     num_clue_tokens = len(clue_tokens)
-    total_clue_idf = sum(idf_scores.get(t, 1.0) for t in clue_tokens)
+    
+    # 1. Sort clue tokens by rarity (highest IDF first)
+    # This automatically finds words like 'feline' without needing a hardcoded cutoff
+    sorted_clue_tokens = sorted(
+        clue_tokens, key=lambda t: idf_scores.get(t, 0.0), reverse=True
+    )
+    
+    # The top 50% rarest tokens are designated as mandatory core descriptors
+    cutoff = max(1, math.ceil(num_clue_tokens * 0.5))
+    core_keywords = set(sorted_clue_tokens[:cutoff])
 
-    # 1. Identify rare/descriptive terms in clue (IDF >= 4.5)
-    rare_clue_tokens = [t for t in clue_tokens if idf_scores.get(t, 0) >= 4.5]
-
-    # Candidate retrieval
+    # 2. Candidate collection: gather candidates from core keywords first
     candidate_words = set()
-    search_tokens = rare_clue_tokens if rare_clue_tokens else clue_tokens
-    for token in search_tokens:
+    for token in core_keywords:
         if token in dictionary_index:
             candidate_words.update(dictionary_index[token])
 
-    # Filter to valid crossword dictionary
+    # Filter to valid crossword words
     valid_crossword_set = {w[0].lower() for w in words_data}
     candidate_words &= valid_crossword_set
 
-    # Filter by exact word length
+    # Filter by selected word length
     if selected_length != "Any":
         candidate_words = {
             w for w in candidate_words 
             if sum(ch.isalpha() for ch in w) == selected_length
         }
 
-    # Filter by wildcard pattern
+    # Filter by optional regex pattern
     if pattern.strip():
         try:
             regex = re.compile(pattern_to_regex(pattern), re.IGNORECASE)
@@ -365,58 +370,47 @@ def search_dictionary_for_clue(
 
         unique_def_tokens = set(definition_tokens)
 
-        # --- MANDATORY COVERAGE RULES ---
-        # 1. Must contain rare clue token if present
-        if rare_clue_tokens and not any(rt in unique_def_tokens for rt in rare_clue_tokens):
+        # MANDATORY CHECK 1: Must contain ALL core keywords (e.g. 'feline')
+        if not core_keywords.issubset(unique_def_tokens):
             continue
 
-        # 2. Count matched clue tokens
+        # MANDATORY CHECK 2: Must match at least 60% of all clue words
         matched_tokens = [t for t in clue_tokens if t in unique_def_tokens]
         matched_count = len(matched_tokens)
-        matched_idf = sum(idf_scores.get(t, 1.0) for t in matched_tokens)
+        coverage_ratio = matched_count / num_clue_tokens
 
-        # 3. Clue Concept Coverage Ratio (Count-based & IDF-based)
-        token_coverage_ratio = matched_count / num_clue_tokens
-        idf_coverage_ratio = matched_idf / total_clue_idf if total_clue_idf > 0 else 0
-
-        # Require matching at least 50% of the clue tokens when clue has multiple words
-        if num_clue_tokens >= 2 and token_coverage_ratio < 0.5:
+        if num_clue_tokens >= 2 and coverage_ratio < 0.60:
             continue
 
         # --- SCORING ---
-        # Base score driven directly by matched IDF weight
-        score = matched_idf * 20.0
+        matched_idf = sum(idf_scores.get(t, 1.0) for t in matched_tokens)
+        base_score = matched_idf * 20.0
 
-        # Smooth length penalty (prevents 2-word definitions like 'CATTISH' from getting 10x score)
-        # Ideal definition length is ~8-25 words.
+        # Balanced definition length penalty
         length_factor = 1.0 / (1.0 + 0.15 * math.log(max(def_length, 1)))
-        score *= length_factor
-
-        # Multiply by coverage squared to heavily reward matching MORE clue words
-        score *= (token_coverage_ratio ** 2)
+        score = base_score * length_factor * (coverage_ratio ** 2)
 
         # Antonym / Contradiction penalty
         if opposing_words and any(opp in unique_def_tokens for opp in opposing_words):
-            score *= 0.1
+            score *= 0.10
 
-        # Proximity boost: clue tokens appear early in definition
+        # Proximity boost (clue terms appear early in definition)
         first_8 = set(definition_tokens[:8])
-        early_matches = sum(1 for t in clue_tokens if t in first_8)
-        if early_matches >= 2:
+        if sum(1 for t in clue_tokens if t in first_8) >= 2:
             score += 15.0
 
-        # Substring / Exact match bonus
+        # Exact clue phrase bonus
         if clue_lower in definition.lower():
             score += 35.0
 
-        # Part of Speech / Noun priority heuristic (prefers concrete nouns)
+        # Noun preference (crossword answers are typically nouns)
         pos = info.get("part_of_speech", "").lower()
         if "noun" in pos or "n." in pos:
             score += 5.0
         elif "adj" in pos:
-            score -= 5.0  # Penalize adjectives like CATTISH
+            score -= 5.0
 
-        # Answer frequency boost
+        # Answer commonness boost
         score += frequency_score(candidate) * 0.5
 
         if score > 0:
@@ -429,7 +423,6 @@ def search_dictionary_for_clue(
 
     results.sort(key=lambda x: (-x[1], x[0]))
     return results[:MAX_CLUE_RESULTS]
-
 
 # ============================================================
 # INITIALIZE DATA
