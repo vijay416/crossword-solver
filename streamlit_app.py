@@ -257,30 +257,25 @@ def load_dictionary():
 
 @st.cache_data
 def build_dictionary_search_index_with_idf(dictionary):
-    """
-    Builds a reverse index AND pre-calculates Inverse Document Frequency (IDF) 
-    scores for every token in the dictionary.
-    """
+    """Build reverse search index and compute word IDF scores."""
     index = {}
     doc_count = len(dictionary)
-    doc_frequencies = Counter()
+    doc_freqs = Counter()
 
     for dict_word, info in dictionary.items():
         tokens = set(tokenize(info.get("definition", "")))
         for token in tokens:
-            index.setdefault(token, set()).add(dict_word)
-            doc_frequencies[token] += 1
+            if token not in index:
+                index[token] = set()
+            index[token].add(dict_word)
+            doc_freqs[token] += 1
 
-    # IDF = log(Total Documents / Documents containing token)
-    # Rare words (e.g., 'feline') get high IDF (~8-10)
-    # Common words (e.g., 'animal', 'small') get low IDF (~2-3)
-    idf_scores = {
-        token: math.log(doc_count / count) 
-        for token, count in doc_frequencies.items()
-    }
+    # Calculate Inverse Document Frequency (IDF) for all tokens
+    idf_scores = {}
+    for token, freq in doc_freqs.items():
+        idf_scores[token] = math.log((doc_count + 1) / (freq + 1)) + 1.0
 
     return index, idf_scores
-
 
 # ============================================================
 # SEARCH LOGIC
