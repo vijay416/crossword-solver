@@ -399,20 +399,17 @@ tab1, tab2 = st.tabs(["🔎 Pattern Search", "📖 Dictionary Clue Solver"])
 with tab1:
     st.subheader("Pattern Search")
 
-    pattern = st.text_input(
-        "Enter crossword pattern",
-        placeholder="Example: A??E or ?A? or AARD-V_RK",
-        key="pattern_input"
-    )
+    # Wrap inputs inside a form
+    with st.form("pattern_search_form"):
+        pattern = st.text_input("Enter crossword pattern", placeholder="Example: A??E")
+        selected_length = st.selectbox("Exact word length", options=["Any"] + list(range(3, 10)))
+        
+        # Form submit button replaces regular st.button
+        search_clicked = st.form_submit_button("🔍 Search", type="primary")
 
-    selected_length = st.selectbox(
-        "Exact word length",
-        options=["Any"] + list(range(3, 10)),
-        index=0,
-        help="Choose Any for all lengths, or select 3–9 for exact letter count."
-    )
-
-    if st.button("🔍 Search", type="primary", key="pattern_search_button"):
+    if search_clicked:
+        # Search logic only executes here when submit is pressed
+    
         if not pattern.strip():
             st.warning("Please enter a pattern.")
             st.session_state.pattern_results = []
@@ -424,8 +421,8 @@ with tab1:
                 )
                 st.session_state.last_pattern = pattern.upper()
 
-    results = st.session_state.get("pattern_results", [])
-    last_pattern = st.session_state.get("last_pattern", "")
+        results = st.session_state.get("pattern_results", [])
+        last_pattern = st.session_state.get("last_pattern", "")
 
     if results:
         st.markdown(f"**Top {len(results)} possibilities for `{last_pattern}`**")
